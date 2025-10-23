@@ -1,12 +1,82 @@
 import streamlit as st
 import pandas as pd
+import re
 from io import BytesIO
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 import folium
 from streamlit_folium import st_folium
 
-from moa_core import process_csv_to_moa_df
+# ============================================================
+# === FONCTIONS MOA (extraites de moa_core.py) ===============
+# ============================================================
+
+def _find_columns(cols):
+    res = {}
+    for c in cols:
+        cl = c.lower()
+        if "raison" in cl and "sociale" in cl:
+            res["raison"] = c
+        elif "catég" in cl or "categorie" in cl or "catég" in cl:
+            res["categorie"] = c
+        elif ("référent" in cl and "moa" in cl) or ("referent" in cl and "moa" in cl):
+            res["referent"] = c
+        elif ("email" in cl and "referent" in cl) or ("email" in cl and "référent" in cl):
+            res["email_referent"] = c
+        elif "contacts" in cl:
+            res["contacts"] = c
+    return res
+
+def _derive_contact_moa(row, colmap):
+    email = None
+    if "email_referent" in colmap:
+        v = row.get(colmap["email_referent"], "")
+        if isinstance(v, str) and "@" in v:
+            email = v.strip()
+    if (not email) and "contacts" in colmap:
+        raw = str(row.get(colmap["contacts"], ""))
+        emails = re.split(r"[,\s;]+", raw)
+        emails = [e.strip().rstrip(".,;") for e in emails if "@" in e]
+        name = str(row.get(colmap.get("referent", ""), "")).strip()
+        tokens = [t for t in re.split(r"[\s\-]+", name.lower()) if t]
+        best = None
+        for e in emails:
+            local = e.split("@",1)[0].lower()
+            score = sum(tok in local for tok in tokens if len(tok) >= 2)
+            if best is None or score > best[0]:
+                best = (score, e)
+        if best and best[0] > 0:
+            email = best[1]
+        elif emails:
+            email = emails[0]
+    return email or ""
+
+def process_csv_to_moa_df(csv_bytes_or_path):
+    df = pd.read_csv(csv_bytes_or_path, sep=None, engine="python")
+    colmap = _find_columns(df.columns)
+    if "raison" not in colmap:
+        df["Raison sociale"] = None
+        colmap["raison"] = "Raison sociale"
+    if "categorie" not in colmap:
+        df["Catégories"] = None
+        colmap["categorie"] = "Catégories"
+    if "referent" not in colmap:
+        df["Référent MOA"] = ""
+        colmap["referent"] = "Référent MOA"
+    if "email_referent" not in colmap and "contacts" not in colmap:
+        df["Contacts"] = ""
+        colmap["contacts"] = "Contacts"
+
+    out = pd.DataFrame()
+    out["Raison sociale"] = df[colmap["raison"]]
+    out["Référent MOA"] = df[colmap["referent"]]
+    out["Contact MOA"] = df.apply(lambda r: _derive_contact_moa(r, colmap), axis=1)
+    out["Catégories"] = df[colmap["categorie"]].apply(lambda x: str(x).strip() if pd.notna(x) else "")
+    return out
+
+# ============================================================
+# === DISTANCES ET CARTE =====================================
+# ============================================================
 
 def get_coordinates(address):
     geolocator = Nominatim(user_agent="moa_distance_app")
@@ -69,15 +139,12 @@ def to_excel(df):
 def create_map(df, base_coords, base_address):
     if base_coords is None:
         return None
-
     fmap = folium.Map(location=base_coords, zoom_start=6)
-
     folium.Marker(
         location=base_coords,
         popup=f"Adresse de référence : {base_address}",
         icon=folium.Icon(color="red", icon="home"),
     ).add_to(fmap)
-
     for _, row in df.iterrows():
         if pd.notna(row.get("Latitude")) and pd.notna(row.get("Longitude")):
             popup_html = f"""
@@ -92,34 +159,26 @@ def create_map(df, base_coords, base_address):
                 popup=popup_html,
                 icon=folium.Icon(color="blue", icon="building"),
             ).add_to(fmap)
-
-            if row.get("Distance (km)"):
-                folium.PolyLine(
-                    [base_coords, [row["Latitude"], row["Longitude"]]],
-                    color="green",
-                    weight=1,
-                    opacity=0.6
-                ).add_to(fmap)
     return fmap
+
+# ============================================================
+# === INTERFACE STREAMLIT ====================================
+# ============================================================
 
 st.set_page_config(page_title="MOA Extractor + Carte", page_icon="📍", layout="wide")
 
 st.title("📍 MOA Extractor + Distances + Carte interactive")
-st.markdown(
-    "Cet outil convertit un fichier CSV en Excel enrichi, récupère automatiquement les bons contacts MOA "
-    "et ajoute les distances à partir d'une adresse de référence."
-)
+st.write("Téléversez un fichier CSV, entrez une adresse de référence, et obtenez un Excel enrichi + carte interactive.")
 
 uploaded_file = st.file_uploader("📄 Choisir un fichier CSV", type=["csv"])
 base_address = st.text_input("🏠 Adresse de référence", placeholder="Ex : 10 rue de Rivoli, Paris")
 
 if uploaded_file and base_address:
     try:
-        with st.spinner("⏳ Traitement du fichier et calcul des distances..."):
+        with st.spinner("⏳ Traitement en cours..."):
             df = process_csv_to_moa_df(uploaded_file)
             df, base_coords = compute_distances(df, base_address)
-
-        st.success("✅ Conversion réussie !")
+        st.success("✅ Fichier traité avec succès !")
 
         excel_data = to_excel(df)
         st.download_button(
@@ -129,15 +188,12 @@ if uploaded_file and base_address:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        st.subheader("🌍 Carte des acteurs MOA")
+        st.subheader("🌍 Carte interactive")
         fmap = create_map(df, base_coords, base_address)
         if fmap:
             st_folium(fmap, width=1000, height=600)
-        else:
-            st.warning("Impossible d’afficher la carte.")
-
         st.subheader("📋 Aperçu des données")
         st.dataframe(df.head(10))
-
     except Exception as e:
         st.error(f"Erreur pendant le traitement : {e}")
+
