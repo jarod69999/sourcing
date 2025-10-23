@@ -6,6 +6,7 @@ from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 import folium
 from streamlit_folium import st_folium
+import time
 
 # ============================================================
 # === LOGIQUE MOA ============================================
@@ -25,9 +26,10 @@ def _find_columns(cols):
             res["email_referent"] = c
         elif "contacts" in cl:
             res["contacts"] = c
-        elif "adress" in cl:  # 👈 plus souple : “Adresse”, “Adresse postale”, etc.
+        elif "adress" in cl:  # tolérant : adresse / address / adresse postale...
             res["adresse"] = c
     return res
+
 
 def _derive_contact_moa(row, colmap):
     email = None
@@ -43,7 +45,7 @@ def _derive_contact_moa(row, colmap):
         tokens = [t for t in re.split(r"[\s\-]+", name.lower()) if t]
         best = None
         for e in emails:
-            local = e.split("@",1)[0].lower()
+            local = e.split("@", 1)[0].lower()
             score = sum(tok in local for tok in tokens if len(tok) >= 2)
             if best is None or score > best[0]:
                 best = (score, e)
@@ -52,6 +54,7 @@ def _derive_contact_moa(row, colmap):
         elif emails:
             email = emails[0]
     return email or ""
+
 
 def process_csv_to_moa_df(csv_bytes_or_path):
     df = pd.read_csv(csv_bytes_or_path, sep=None, engine="python")
@@ -76,7 +79,7 @@ def process_csv_to_moa_df(csv_bytes_or_path):
     out["Contact MOA"] = df.apply(lambda r: _derive_contact_moa(r, colmap), axis=1)
     out["Catégories"] = df[colmap["categorie"]].apply(lambda x: str(x).strip() if pd.notna(x) else "")
 
-    # 👇 Ajout de la colonne d’adresse si elle existe
+    # Ajout de la colonne d’adresse si elle existe
     if "adresse" in colmap:
         out["Adresse"] = df[colmap["adresse"]].astype(str)
     else:
@@ -84,27 +87,39 @@ def process_csv_to_moa_df(csv_bytes_or_path):
 
     return out
 
+
 # ============================================================
 # === DISTANCES ET CARTE =====================================
 # ============================================================
 
 def get_coordinates(address):
-    """Retourne (lat, lon) si possible, sinon None."""
+    """Retourne (lat, lon) si possible, sinon None (avec tolérance et ajout automatique de 'France')."""
     if not address or not isinstance(address, str) or address.strip() == "":
         return None
+
+    # Ajouter "France" si manquant
+    if "france" not in address.lower():
+        address = address.strip() + ", France"
+
     geolocator = Nominatim(user_agent="moa_distance_app")
     try:
-        location = geolocator.geocode(address)
+        # On ajoute une pause pour éviter les blocages Nominatim
+        time.sleep(1)
+        location = geolocator.geocode(address, timeout=10)
         if location:
             return (location.latitude, location.longitude)
     except Exception:
-        return None
+        pass
     return None
+
 
 def compute_distances(df, base_address):
     base_coords = get_coordinates(base_address)
     if not base_coords:
-        st.error("❌ Impossible de géocoder l’adresse de référence.")
+        st.warning("⚠️ Impossible de géocoder l’adresse de référence. Vérifie qu’elle contient 'France'.")
+        df["Latitude"] = ""
+        df["Longitude"] = ""
+        df["Distance (km)"] = ""
         return df, None
 
     if "Adresse" not in df.columns:
@@ -132,6 +147,7 @@ def compute_distances(df, base_address):
     df["Distance (km)"] = dists
     return df, base_coords
 
+
 def to_excel(df):
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -143,6 +159,7 @@ def to_excel(df):
     output.seek(0)
     return output
 
+
 def create_map(df, base_coords, base_address):
     if base_coords is None:
         return None
@@ -152,6 +169,7 @@ def create_map(df, base_coords, base_address):
         popup=f"Adresse de référence : {base_address}",
         icon=folium.Icon(color="red", icon="home"),
     ).add_to(fmap)
+
     for _, row in df.iterrows():
         if pd.notna(row.get("Latitude")) and pd.notna(row.get("Longitude")):
             popup_html = f"""
@@ -169,6 +187,7 @@ def create_map(df, base_coords, base_address):
             ).add_to(fmap)
     return fmap
 
+
 # ============================================================
 # === INTERFACE STREAMLIT ====================================
 # ============================================================
@@ -179,7 +198,7 @@ st.title("📍 MOA Extractor + Distances + Carte interactive")
 st.write("Téléversez un fichier CSV, entrez une adresse de référence, et obtenez un Excel enrichi + carte interactive.")
 
 uploaded_file = st.file_uploader("📄 Choisir un fichier CSV", type=["csv"])
-base_address = st.text_input("🏠 Adresse de référence", placeholder="Ex : 17 Boulevard Allende, Langon")
+base_address = st.text_input("🏠 Adresse de référence", placeholder="Ex : 17 Boulevard Allende 33210 Langon France")
 
 if uploaded_file and base_address:
     try:
