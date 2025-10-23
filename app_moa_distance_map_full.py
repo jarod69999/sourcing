@@ -8,7 +8,7 @@ import folium
 from streamlit_folium import st_folium
 
 # ============================================================
-# === FONCTIONS MOA (extraites de moa_core.py) ===============
+# === LOGIQUE MOA ============================================
 # ============================================================
 
 def _find_columns(cols):
@@ -17,7 +17,7 @@ def _find_columns(cols):
         cl = c.lower()
         if "raison" in cl and "sociale" in cl:
             res["raison"] = c
-        elif "catég" in cl or "categorie" in cl or "catég" in cl:
+        elif "catég" in cl or "categorie" in cl:
             res["categorie"] = c
         elif ("référent" in cl and "moa" in cl) or ("referent" in cl and "moa" in cl):
             res["referent"] = c
@@ -25,6 +25,8 @@ def _find_columns(cols):
             res["email_referent"] = c
         elif "contacts" in cl:
             res["contacts"] = c
+        elif "adress" in cl:  # 👈 plus souple : “Adresse”, “Adresse postale”, etc.
+            res["adresse"] = c
     return res
 
 def _derive_contact_moa(row, colmap):
@@ -54,6 +56,7 @@ def _derive_contact_moa(row, colmap):
 def process_csv_to_moa_df(csv_bytes_or_path):
     df = pd.read_csv(csv_bytes_or_path, sep=None, engine="python")
     colmap = _find_columns(df.columns)
+
     if "raison" not in colmap:
         df["Raison sociale"] = None
         colmap["raison"] = "Raison sociale"
@@ -72,6 +75,13 @@ def process_csv_to_moa_df(csv_bytes_or_path):
     out["Référent MOA"] = df[colmap["referent"]]
     out["Contact MOA"] = df.apply(lambda r: _derive_contact_moa(r, colmap), axis=1)
     out["Catégories"] = df[colmap["categorie"]].apply(lambda x: str(x).strip() if pd.notna(x) else "")
+
+    # 👇 Ajout de la colonne d’adresse si elle existe
+    if "adresse" in colmap:
+        out["Adresse"] = df[colmap["adresse"]].astype(str)
+    else:
+        out["Adresse"] = ""
+
     return out
 
 # ============================================================
@@ -79,13 +89,16 @@ def process_csv_to_moa_df(csv_bytes_or_path):
 # ============================================================
 
 def get_coordinates(address):
+    """Retourne (lat, lon) si possible, sinon None."""
+    if not address or not isinstance(address, str) or address.strip() == "":
+        return None
     geolocator = Nominatim(user_agent="moa_distance_app")
     try:
         location = geolocator.geocode(address)
         if location:
             return (location.latitude, location.longitude)
     except Exception:
-        pass
+        return None
     return None
 
 def compute_distances(df, base_address):
@@ -94,21 +107,15 @@ def compute_distances(df, base_address):
         st.error("❌ Impossible de géocoder l’adresse de référence.")
         return df, None
 
-    address_col = None
-    for c in df.columns:
-        if "adresse" in c.lower() or "address" in c.lower():
-            address_col = c
-            break
-
-    if not address_col:
-        st.warning("⚠️ Aucune colonne 'Adresse' trouvée dans le CSV.")
+    if "Adresse" not in df.columns:
+        st.warning("⚠️ Aucune colonne d’adresse trouvée dans le CSV.")
         df["Latitude"] = ""
         df["Longitude"] = ""
         df["Distance (km)"] = ""
         return df, base_coords
 
     lats, lons, dists = [], [], []
-    for addr in df[address_col].fillna(""):
+    for addr in df["Adresse"]:
         coords = get_coordinates(addr)
         if coords:
             d = geodesic(base_coords, coords).km
@@ -152,6 +159,7 @@ def create_map(df, base_coords, base_address):
             Catégorie : {row.get('Catégories', '')}<br>
             Référent : {row.get('Référent MOA', '')}<br>
             Contact : <a href='mailto:{row.get('Contact MOA', '')}'>{row.get('Contact MOA', '')}</a><br>
+            Adresse : {row.get('Adresse', '')}<br>
             Distance : {row.get('Distance (km)', '')} km
             """
             folium.Marker(
@@ -171,13 +179,14 @@ st.title("📍 MOA Extractor + Distances + Carte interactive")
 st.write("Téléversez un fichier CSV, entrez une adresse de référence, et obtenez un Excel enrichi + carte interactive.")
 
 uploaded_file = st.file_uploader("📄 Choisir un fichier CSV", type=["csv"])
-base_address = st.text_input("🏠 Adresse de référence", placeholder="Ex : 10 rue de Rivoli, Paris")
+base_address = st.text_input("🏠 Adresse de référence", placeholder="Ex : 17 Boulevard Allende, Langon")
 
 if uploaded_file and base_address:
     try:
         with st.spinner("⏳ Traitement en cours..."):
             df = process_csv_to_moa_df(uploaded_file)
             df, base_coords = compute_distances(df, base_address)
+
         st.success("✅ Fichier traité avec succès !")
 
         excel_data = to_excel(df)
@@ -192,8 +201,11 @@ if uploaded_file and base_address:
         fmap = create_map(df, base_coords, base_address)
         if fmap:
             st_folium(fmap, width=1000, height=600)
+
         st.subheader("📋 Aperçu des données")
         st.dataframe(df.head(10))
+
     except Exception as e:
         st.error(f"Erreur pendant le traitement : {e}")
+
 
