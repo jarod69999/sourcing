@@ -1,4 +1,3 @@
-# app_moa_distance_no_map.py
 import streamlit as st
 import pandas as pd
 import re
@@ -7,12 +6,10 @@ from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 import time
 from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
-from copy import copy
-import os
 
-TEMPLATE_PATH = "Sourcing doc base.xlsx"   # ← Assure-toi que le fichier est à la racine
+TEMPLATE_PATH = "Sourcing doc base.xlsx"
 EXPORT_FILENAME = "Sourcing_MOA.xlsx"
+START_ROW = 12  # ligne où commencent les données (1-indexée)
 
 # ============================================================
 # === LOGIQUE MOA ============================================
@@ -32,7 +29,7 @@ def _find_columns(cols):
             res["email_referent"] = c
         elif "contacts" in cl:
             res["contacts"] = c
-        elif "adress" in cl:  # tolère: adresse / address / adresse postale...
+        elif "adress" in cl:
             res["adresse"] = c
     return res
 
@@ -43,7 +40,6 @@ def _derive_contact_moa(row, colmap):
         v = row.get(colmap["email_referent"], "")
         if isinstance(v, str) and "@" in v:
             email = v.strip()
-
     if (not email) and "contacts" in colmap:
         raw = str(row.get(colmap["contacts"], ""))
         emails = re.split(r"[,\s;]+", raw)
@@ -64,7 +60,6 @@ def _derive_contact_moa(row, colmap):
 
 
 def process_csv_to_moa_df(csv_bytes_or_path):
-    # Lecture CSV tolérante sur le séparateur
     try:
         df = pd.read_csv(csv_bytes_or_path, sep=None, engine="python")
     except Exception:
@@ -90,32 +85,23 @@ def process_csv_to_moa_df(csv_bytes_or_path):
     out["Référent MOA"] = df[colmap["referent"]]
     out["Contact MOA"] = df.apply(lambda r: _derive_contact_moa(r, colmap), axis=1)
     out["Catégories"] = df[colmap["categorie"]].apply(lambda x: str(x).strip() if pd.notna(x) else "")
-
-    if "adresse" in colmap:
-        out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("")
-    else:
-        out["Adresse"] = ""
-
+    out["Adresse"] = df[colmap.get("adresse", "")].astype(str).fillna("")
     return out
 
 
 # ============================================================
-# === DISTANCES (PAS DE LAT/LON, PAS DE CARTE) ===============
+# === DISTANCES UNIQUEMENT ===================================
 # ============================================================
 
 def get_coordinates(address):
-    """Retourne (lat, lon) si possible, sinon None. Ajoute 'France' s'il manque."""
     if not address or not isinstance(address, str) or address.strip() == "":
         return None
-
-    address = address.strip()
     if "france" not in address.lower():
         address += ", France"
-
     geolocator = Nominatim(user_agent="moa_distance_app_no_map")
     try:
-        time.sleep(1)  # courtoisie Nominatim
-        location = geolocator.geocode(address, timeout=12)
+        time.sleep(1)
+        location = geolocator.geocode(address, timeout=10)
         if location:
             return (location.latitude, location.longitude)
     except Exception:
@@ -124,19 +110,11 @@ def get_coordinates(address):
 
 
 def compute_distances_only(df, base_address):
-    """Ajoute uniquement 'Distance (km)' à partir d'une adresse de référence.
-       Pas de latitude/longitude, pas de carte."""
     base_coords = get_coordinates(base_address)
     if not base_coords:
         st.warning("⚠️ Impossible de géocoder l’adresse de référence. Vérifie qu’elle est complète et inclut 'France'.")
         df["Distance (km)"] = ""
         return df
-
-    if "Adresse" not in df.columns:
-        st.warning("⚠️ Aucune colonne 'Adresse' trouvée dans le CSV.")
-        df["Distance (km)"] = ""
-        return df
-
     dists = []
     for addr in df["Adresse"]:
         coords = get_coordinates(addr)
@@ -145,82 +123,29 @@ def compute_distances_only(df, base_address):
             dists.append(round(d, 2))
         else:
             dists.append(None)
-
     df["Distance (km)"] = dists
     return df
 
 
 # ============================================================
-# === EXPORT EXCEL AVEC CHARTE DU MODÈLE =====================
+# === EXPORT DANS FEUILLE TYPE ===============================
 # ============================================================
 
-def _clone_cell_style(src_cell, dst_cell):
-    """Copie la plupart des attributs visuels d'une cellule openpyxl."""
-    if src_cell.has_style:
-        dst_cell.font = copy(src_cell.font)
-        dst_cell.border = copy(src_cell.border)
-        dst_cell.fill = copy(src_cell.fill)
-        dst_cell.number_format = copy(src_cell.number_format)
-        dst_cell.protection = copy(src_cell.protection)
-        dst_cell.alignment = copy(src_cell.alignment)
-
-def _copy_col_widths(src_ws, dst_ws, max_cols):
-    for col_idx in range(1, max_cols + 1):
-        letter = get_column_letter(col_idx)
-        if src_ws.column_dimensions.get(letter):
-            dst_ws.column_dimensions[letter].width = src_ws.column_dimensions[letter].width
-
-def to_excel_like_template(df, template_path=TEMPLATE_PATH, target_sheet_name="Export"):
-    """
-    Ouvre le modèle, crée une nouvelle feuille 'Export' (ou réécrit), 
-    colle les données df en reprenant styles d'en-tête/ligne depuis la feuille modèle active.
-    Hypothèses :
-      - la 1ère ligne de la feuille modèle = style d'en-tête
-      - la 2ème ligne de la feuille modèle = style de ligne 'données'
-    """
-    if not os.path.exists(template_path):
-        # fallback: simple export sans style si le modèle n'est pas là
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-            df.to_excel(writer, index=False, sheet_name=target_sheet_name)
-        output.seek(0)
-        return output
-
+def to_excel_in_type_sheet(df, template_path=TEMPLATE_PATH, start_row=START_ROW):
     wb = load_workbook(template_path)
-    ws_model = wb.active  # prend la première feuille du modèle comme référence de styles
+    ws = wb.worksheets[0]  # première feuille (type)
 
-    # Supprime la feuille cible si elle existe déjà
-    if target_sheet_name in wb.sheetnames:
-        std = wb[target_sheet_name]
-        wb.remove(std)
+    # Efface les anciennes lignes sous start_row
+    max_row = ws.max_row
+    for r in range(start_row, max_row + 1):
+        for c in range(1, ws.max_column + 1):
+            ws.cell(r, c, value=None)
 
-    ws = wb.create_sheet(title=target_sheet_name)
+    # écrit le df dans la feuille à partir de start_row
+    for i, (_, row) in enumerate(df.iterrows(), start=start_row):
+        for j, value in enumerate(row, start=1):
+            ws.cell(i, j, value=value)
 
-    # Copie les largeurs de colonnes du modèle (au moins jusqu'au nombre de colonnes du df)
-    _copy_col_widths(ws_model, ws, max_cols=max(len(df.columns), ws_model.max_column))
-
-    # Prépare styles de base (header: ligne 1, body: ligne 2 si dispo)
-    header_style_row = 1
-    body_style_row = 2 if ws_model.max_row >= 2 else 1
-
-    # Écrit l'en-tête avec style
-    for j, col_name in enumerate(df.columns, start=1):
-        cell = ws.cell(row=1, column=j, value=col_name)
-        # Style copié depuis la cellule correspondante du modèle si existe, sinon A1
-        src = ws_model.cell(row=header_style_row, column=min(j, ws_model.max_column))
-        _clone_cell_style(src, cell)
-
-    # Écrit les données + styles
-    for i, (_, row) in enumerate(df.iterrows(), start=2):
-        for j, col_name in enumerate(df.columns, start=1):
-            cell = ws.cell(row=i, column=j, value=row[col_name])
-            src = ws_model.cell(row=body_style_row, column=min(j, ws_model.max_column))
-            _clone_cell_style(src, cell)
-
-    # Place la feuille export en première position (optionnel)
-    wb.move_sheet(ws, offset=-wb.index(ws))
-
-    # Sauvegarde en mémoire
     output = BytesIO()
     wb.save(output)
     output.seek(0)
@@ -231,14 +156,10 @@ def to_excel_like_template(df, template_path=TEMPLATE_PATH, target_sheet_name="E
 # === INTERFACE STREAMLIT ====================================
 # ============================================================
 
-st.set_page_config(page_title="MOA distances (template Excel)", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA distances (type sheet)", page_icon="📍", layout="wide")
 
-st.title("📍 MOA — distances (sans carte) avec export Excel stylé")
-st.caption("Charge un CSV + une adresse de référence, calcule les distances et exporte un Excel conforme à la charte du modèle.")
-
-# Aide rapide si le modèle manque
-if not os.path.exists(TEMPLATE_PATH):
-    st.info(f"ℹ️ Place le fichier modèle **'{TEMPLATE_PATH}'** à la racine du projet pour appliquer la charte graphique.")
+st.title("📍 MOA – distances (injection dans la feuille type)")
+st.caption("Remplit automatiquement la feuille 'type' du modèle à partir de la ligne 12 avec les données calculées.")
 
 uploaded_file = st.file_uploader("📄 Choisir un fichier CSV", type=["csv"])
 base_address = st.text_input("🏠 Adresse de référence", placeholder="Ex : 17 Boulevard Allende 33210 Langon France")
@@ -251,17 +172,17 @@ if uploaded_file and base_address:
 
         st.success("✅ Fichier traité avec succès !")
 
-        # Export avec style du modèle
-        excel_data = to_excel_like_template(df, TEMPLATE_PATH, target_sheet_name="Sourcing MOA")
+        excel_data = to_excel_in_type_sheet(df, TEMPLATE_PATH, START_ROW)
         st.download_button(
-            label="⬇️ Télécharger l’Excel au format du modèle",
+            label="⬇️ Télécharger le fichier Excel 'Sourcing_MOA.xlsx'",
             data=excel_data,
             file_name=EXPORT_FILENAME,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
         st.subheader("📋 Aperçu des données")
-        st.dataframe(df.head(12))
+        st.dataframe(df.head(10))
 
     except Exception as e:
         st.error(f"Erreur pendant le traitement : {e}")
+
