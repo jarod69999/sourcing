@@ -9,7 +9,8 @@ from openpyxl import load_workbook
 
 TEMPLATE_PATH = "Sourcing doc base.xlsx"
 EXPORT_FILENAME = "Sourcing_MOA.xlsx"
-START_ROW = 12  # ligne où commencent les données (1-indexée)
+HEADER_ROW = 10   # ligne où sont les en-têtes
+START_ROW = 12    # ligne où les données commencent
 
 # ============================================================
 # === LOGIQUE MOA ============================================
@@ -101,7 +102,7 @@ def get_coordinates(address):
     geolocator = Nominatim(user_agent="moa_distance_app_no_map")
     try:
         time.sleep(1)
-        location = geolocator.geocode(address, timeout=10)
+        location = geolator.geocode(address, timeout=10)
         if location:
             return (location.latitude, location.longitude)
     except Exception:
@@ -112,7 +113,7 @@ def get_coordinates(address):
 def compute_distances_only(df, base_address):
     base_coords = get_coordinates(base_address)
     if not base_coords:
-        st.warning("⚠️ Impossible de géocoder l’adresse de référence. Vérifie qu’elle est complète et inclut 'France'.")
+        st.warning("⚠️ Impossible de géocoder l’adresse de référence.")
         df["Distance (km)"] = ""
         return df
     dists = []
@@ -128,23 +129,33 @@ def compute_distances_only(df, base_address):
 
 
 # ============================================================
-# === EXPORT DANS FEUILLE TYPE ===============================
+# === EXPORT DANS FEUILLE TYPE (COHÉRENCE AVEC LIGNE 10) ====
 # ============================================================
 
-def to_excel_in_type_sheet(df, template_path=TEMPLATE_PATH, start_row=START_ROW):
+def to_excel_in_type_sheet(df, template_path=TEMPLATE_PATH, header_row=HEADER_ROW, start_row=START_ROW):
     wb = load_workbook(template_path)
     ws = wb.worksheets[0]  # première feuille (type)
 
-    # Efface les anciennes lignes sous start_row
-    max_row = ws.max_row
-    for r in range(start_row, max_row + 1):
+    # Récupère les intitulés de la ligne 10
+    headers = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
+    headers = [h for h in headers if h is not None and str(h).strip() != ""]
+
+    # Efface les anciennes données à partir de start_row
+    for r in range(start_row, ws.max_row + 1):
         for c in range(1, ws.max_column + 1):
             ws.cell(r, c, value=None)
 
-    # écrit le df dans la feuille à partir de start_row
+    # pour chaque colonne du modèle, on cherche la meilleure correspondance dans le df
     for i, (_, row) in enumerate(df.iterrows(), start=start_row):
-        for j, value in enumerate(row, start=1):
-            ws.cell(i, j, value=value)
+        for c, header in enumerate(headers, start=1):
+            header_norm = str(header).strip().lower()
+            matched_col = None
+            for df_col in df.columns:
+                if header_norm in df_col.lower() or df_col.lower() in header_norm:
+                    matched_col = df_col
+                    break
+            value = row.get(matched_col, "") if matched_col else ""
+            ws.cell(i, c, value=value)
 
     output = BytesIO()
     wb.save(output)
@@ -156,10 +167,10 @@ def to_excel_in_type_sheet(df, template_path=TEMPLATE_PATH, start_row=START_ROW)
 # === INTERFACE STREAMLIT ====================================
 # ============================================================
 
-st.set_page_config(page_title="MOA distances (type sheet)", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA distances (feuille type)", page_icon="📍", layout="wide")
 
-st.title("📍 MOA – distances (injection dans la feuille type)")
-st.caption("Remplit automatiquement la feuille 'type' du modèle à partir de la ligne 12 avec les données calculées.")
+st.title("📍 MOA – distances (remplissage cohérent avec la feuille type)")
+st.caption("Lit la ligne 10 du modèle pour remplir automatiquement les bonnes colonnes à partir de la ligne 12.")
 
 uploaded_file = st.file_uploader("📄 Choisir un fichier CSV", type=["csv"])
 base_address = st.text_input("🏠 Adresse de référence", placeholder="Ex : 17 Boulevard Allende 33210 Langon France")
@@ -172,7 +183,7 @@ if uploaded_file and base_address:
 
         st.success("✅ Fichier traité avec succès !")
 
-        excel_data = to_excel_in_type_sheet(df, TEMPLATE_PATH, START_ROW)
+        excel_data = to_excel_in_type_sheet(df, TEMPLATE_PATH, HEADER_ROW, START_ROW)
         st.download_button(
             label="⬇️ Télécharger le fichier Excel 'Sourcing_MOA.xlsx'",
             data=excel_data,
