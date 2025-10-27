@@ -1,4 +1,6 @@
-# app_moa_distance_final.py
+
+
+# app_moa_distance_final_v2.py
 import streamlit as st
 import pandas as pd
 import re
@@ -11,10 +13,10 @@ from openpyxl import load_workbook
 TEMPLATE_PATH = "Sourcing base.xlsx"
 EXPORT_FILENAME_FULL = "Sourcing_MOA.xlsx"
 EXPORT_FILENAME_SIMPLE = "MOA_contact_simple.xlsx"
-START_ROW = 11  # nouvelle ligne de départ pour l’écriture
+START_ROW = 11  # ligne de départ d'écriture
 
 # ============================================================
-# === OUTILS CSV / COLONNES SOURCES ==========================
+# === OUTILS CSV / EXTRACTION DE COLONNES ====================
 # ============================================================
 
 def _find_columns(cols):
@@ -90,7 +92,6 @@ def process_csv_to_moa_df(csv_bytes_or_path):
     out["Adresse"] = df[colmap.get("adresse", "")].astype(str).fillna("")
     return out
 
-
 # ============================================================
 # === DISTANCES PAR CODE POSTAL ==============================
 # ============================================================
@@ -105,7 +106,7 @@ def extract_postcode(text: str) -> str | None:
 
 @st.cache_data(show_spinner=False)
 def geocode_postcode(cp: str):
-    geolocator = Nominatim(user_agent="moa_distance_by_postcode_final")
+    geolocator = Nominatim(user_agent="moa_distance_by_postcode_v2")
     try:
         time.sleep(1)
         loc = geolocator.geocode(f"{cp}, France", timeout=12)
@@ -118,16 +119,16 @@ def geocode_postcode(cp: str):
 def compute_distances_by_cp(df: pd.DataFrame, base_address: str) -> pd.DataFrame:
     base_cp = extract_postcode(base_address)
     if not base_cp:
-        st.warning("⚠️ Impossible de déterminer le code postal de l’adresse de référence.")
+        st.warning("⚠️ Impossible de déterminer le code postal de référence.")
         df["Code postal"] = df["Adresse"].apply(extract_postcode)
-        df["Distance (km)"] = ""
+        df["Distance au projet"] = ""
         return df
 
     base_coords = geocode_postcode(base_cp)
     if not base_coords:
         st.warning(f"⚠️ Code postal de référence {base_cp} non géocodable.")
         df["Code postal"] = df["Adresse"].apply(extract_postcode)
-        df["Distance (km)"] = ""
+        df["Distance au projet"] = ""
         return df
 
     df["Code postal"] = df["Adresse"].apply(extract_postcode)
@@ -141,36 +142,45 @@ def compute_distances_by_cp(df: pd.DataFrame, base_address: str) -> pd.DataFrame
             dists.append(round(geodesic(base_coords, coords).km, 2))
         else:
             dists.append(None)
-    df["Distance (km)"] = dists
+    df["Distance au projet"] = dists
     return df
 
-
 # ============================================================
-# === EXPORTS EXCEL ==========================================
+# === EXPORTS EXCEL (MODELE + SIMPLE) ========================
 # ============================================================
 
 def to_excel_in_first_sheet(df, template_path=TEMPLATE_PATH, start_row=START_ROW):
     wb = load_workbook(template_path)
-    ws = wb.worksheets[0]  # première feuille
+    ws = wb.worksheets[0]
 
     headers = [ws.cell(row=start_row - 1, column=c).value for c in range(1, ws.max_column + 1)]
     while headers and headers[-1] is None:
         headers.pop()
 
-    # efface anciennes données
+    # efface les anciennes données
     for r in range(start_row, ws.max_row + 1):
         for c in range(1, len(headers) + 1):
             ws.cell(r, c, value=None)
 
-    # écrit les données à partir de start_row
+    # repère les colonnes spéciales
+    addr_col = cp_col = dist_col = None
+    for j, header in enumerate(headers, start=1):
+        if header and "adresse" in str(header).lower():
+            addr_col = j
+        elif header and header.strip().lower() in ["cp", "code postal"]:
+            cp_col = j
+        elif header and "distance" in str(header).lower():
+            dist_col = j
+
+    # écriture des lignes
     for i, (_, row) in enumerate(df.iterrows(), start=start_row):
-        for j, header in enumerate(headers, start=1):
-            # raison sociale forcée dans la première colonne
-            if j == 1:
-                value = row.get("Raison sociale", "")
-            else:
-                value = row.get(header, "") if header in df.columns else ""
-            ws.cell(i, j, value=value)
+        ws.cell(i, 1, value=row.get("Raison sociale", ""))  # colonne 1 = Raison sociale
+        if addr_col:
+            ws.cell(i, addr_col, value=row.get("Adresse", ""))
+        if cp_col:
+            ws.cell(i, cp_col, value=row.get("Code postal", ""))
+        if dist_col:
+            ws.cell(i, dist_col, value=row.get("Distance au projet", ""))
 
     output = BytesIO()
     wb.save(output)
@@ -179,7 +189,6 @@ def to_excel_in_first_sheet(df, template_path=TEMPLATE_PATH, start_row=START_ROW
 
 
 def to_simple_excel(df):
-    """Crée un Excel simplifié sans mise en forme : Raison sociale, Référent, Contact, Catégories."""
     simple_df = df[["Raison sociale", "Référent MOA", "Contact MOA", "Catégories"]].copy()
     output = BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
@@ -187,18 +196,17 @@ def to_simple_excel(df):
     output.seek(0)
     return output
 
-
 # ============================================================
 # === INTERFACE STREAMLIT ====================================
 # ============================================================
 
-st.set_page_config(page_title="MOA – distances par CP", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA – distances (par CP)", page_icon="📍", layout="wide")
 
-st.title("📍 MOA – distances (remplissage du modèle + export simple)")
-st.caption("Lit le modèle Excel, remplit à partir de la ligne 11, calcule les distances par code postal et permet un export simplifié.")
+st.title("📍 MOA – distances (remplissage modèle + export simplifié)")
+st.caption("Remplit le modèle à partir de la ligne 11, ajoute Adresse / CP / Distance au projet et génère aussi un export simplifié.")
 
 uploaded_file = st.file_uploader("📄 Choisir un fichier CSV", type=["csv"])
-base_address = st.text_input("🏠 Adresse ou code postal de référence", placeholder="Ex : 17 Boulevard Allende 33210 Langon France ou 33210")
+base_address = st.text_input("🏠 Adresse ou code postal de référence", placeholder="Ex : 33210 Langon France ou 33210")
 
 if uploaded_file and base_address:
     try:
@@ -208,16 +216,14 @@ if uploaded_file and base_address:
 
         st.success("✅ Fichier traité avec succès !")
 
-        # --- Bouton 1 : export vers modèle complet ---
         excel_full = to_excel_in_first_sheet(df, TEMPLATE_PATH, START_ROW)
         st.download_button(
-            label="⬇️ Télécharger le fichier Excel complet (Sourcing_MOA.xlsx)",
+            label="⬇️ Télécharger le fichier complet (Sourcing_MOA.xlsx)",
             data=excel_full,
             file_name=EXPORT_FILENAME_FULL,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        # --- Bouton 2 : export simplifié ---
         excel_simple = to_simple_excel(df)
         st.download_button(
             label="⬇️ Télécharger le fichier simplifié (MOA_contact_simple.xlsx)",
@@ -231,7 +237,4 @@ if uploaded_file and base_address:
 
     except Exception as e:
         st.error(f"Erreur pendant le traitement : {e}")
-
-    
-
 
