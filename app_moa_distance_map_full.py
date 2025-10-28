@@ -1,4 +1,3 @@
-# app_moa_distance_final_v3.py
 import streamlit as st
 import pandas as pd
 import re
@@ -7,6 +6,7 @@ from io import BytesIO
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 from openpyxl import load_workbook
+import matplotlib.pyplot as plt
 
 TEMPLATE_PATH = "Sourcing base.xlsx"
 EXPORT_FILENAME_FULL = "Sourcing_MOA.xlsx"
@@ -68,7 +68,6 @@ def process_csv_to_moa_df(csv_bytes_or_path):
         df = pd.read_csv(csv_bytes_or_path, sep=";", engine="python")
 
     colmap = _find_columns(df.columns)
-
     if "raison" not in colmap:
         df["Raison sociale"] = None
         colmap["raison"] = "Raison sociale"
@@ -84,14 +83,16 @@ def process_csv_to_moa_df(csv_bytes_or_path):
 
     out = pd.DataFrame()
     out["Raison sociale"] = df[colmap["raison"]]
+    out["Pays"] = "France"  # pays ajouté
     out["Référent MOA"] = df[colmap["referent"]]
     out["Contact MOA"] = df.apply(lambda r: _derive_contact_moa(r, colmap), axis=1)
     out["Catégories"] = df[colmap["categorie"]].apply(lambda x: str(x).strip() if pd.notna(x) else "")
     out["Adresse"] = df[colmap.get("adresse", "")].astype(str).fillna("")
     return out
 
+
 # ============================================================
-# === DISTANCES PAR CODE POSTAL (tolère "43 260") ============
+# === DISTANCES PAR CODE POSTAL ==============================
 # ============================================================
 
 CP_REGEX = re.compile(r"(?<!\d)(\d{2}\s?\d{3})(?!\d)")
@@ -102,12 +103,11 @@ def extract_postcode(text: str) -> str | None:
     m = CP_REGEX.search(text)
     if not m:
         return None
-    return m.group(1).replace(" ", "")  # supprime l’espace éventuel
-
+    return m.group(1).replace(" ", "")
 
 @st.cache_data(show_spinner=False)
 def geocode_postcode(cp: str):
-    geolocator = Nominatim(user_agent="moa_distance_by_postcode_v3")
+    geolocator = Nominatim(user_agent="moa_distance_by_postcode_v5")
     try:
         time.sleep(1)
         loc = geolocator.geocode(f"{cp}, France", timeout=12)
@@ -117,21 +117,13 @@ def geocode_postcode(cp: str):
         return None
     return None
 
-
-def compute_distances_by_cp(df: pd.DataFrame, base_address: str) -> pd.DataFrame:
-    base_cp = extract_postcode(base_address)
-    if not base_cp:
-        st.warning("⚠️ Impossible de déterminer le code postal de référence.")
-        df["Code postal"] = df["Adresse"].apply(extract_postcode)
-        df["Distance au projet"] = ""
-        return df
-
+def compute_distances_by_cp(df: pd.DataFrame, base_cp: str) -> pd.DataFrame:
     base_coords = geocode_postcode(base_cp)
     if not base_coords:
         st.warning(f"⚠️ Code postal de référence {base_cp} non géocodable.")
         df["Code postal"] = df["Adresse"].apply(extract_postcode)
         df["Distance au projet"] = ""
-        return df
+        return df, None, {}
 
     df["Code postal"] = df["Adresse"].apply(extract_postcode)
     unique_cps = sorted({cp for cp in df["Code postal"].dropna().unique() if isinstance(cp, str)})
@@ -141,11 +133,12 @@ def compute_distances_by_cp(df: pd.DataFrame, base_address: str) -> pd.DataFrame
     for cp in df["Code postal"]:
         coords = cp_to_coords.get(cp) if cp else None
         if coords:
-            dists.append(round(geodesic(base_coords, coords).km, 2))
+            dists.append(round(geodesic(base_coords, coords).km))  # arrondi au km
         else:
             dists.append(None)
     df["Distance au projet"] = dists
-    return df
+    return df, base_coords, cp_to_coords
+
 
 # ============================================================
 # === EXPORTS EXCEL ==========================================
@@ -159,18 +152,18 @@ def to_excel_in_first_sheet(df, template_path=TEMPLATE_PATH, start_row=START_ROW
     while headers and headers[-1] is None:
         headers.pop()
 
-    # Efface anciennes données
     for r in range(start_row, ws.max_row + 1):
         for c in range(1, len(headers) + 1):
             ws.cell(r, c, value=None)
 
-    # Repérage colonnes cibles
-    addr_col = cp_col = dist_col = cat_col = ref_col = contact_col = None
+    addr_col = cp_col = dist_col = cat_col = ref_col = contact_col = pays_col = None
     for j, h in enumerate(headers, start=1):
         if not h:
             continue
         hlow = str(h).strip().lower()
-        if "adresse" in hlow:
+        if "pays" in hlow:
+            pays_col = j
+        elif "adresse" in hlow:
             addr_col = j
         elif hlow in ("cp", "code postal"):
             cp_col = j
@@ -183,9 +176,10 @@ def to_excel_in_first_sheet(df, template_path=TEMPLATE_PATH, start_row=START_ROW
         elif "contact moa" in hlow:
             contact_col = j
 
-    # Écriture
     for i, (_, row) in enumerate(df.iterrows(), start=start_row):
-        ws.cell(i, 1, value=row.get("Raison sociale", ""))  # Col.1 = raison sociale
+        ws.cell(i, 1, value=row.get("Raison sociale", ""))
+        if pays_col:
+            ws.cell(i, pays_col, value=row.get("Pays", "France"))
         if addr_col:
             ws.cell(i, addr_col, value=row.get("Adresse", ""))
         if cp_col:
@@ -213,34 +207,52 @@ def to_simple_excel(df):
     out.seek(0)
     return out
 
+
+# ============================================================
+# === CARTE STATIQUE =========================================
+# ============================================================
+
+def plot_static_map(df, base_cp, cp_to_coords, base_coords):
+    plt.figure(figsize=(6, 8))
+    # points acteurs
+    for cp, coords in cp_to_coords.items():
+        if coords:
+            plt.scatter(coords[1], coords[0], color="blue", s=40)
+    # point projet
+    if base_coords:
+        plt.scatter(base_coords[1], base_coords[0], color="red", s=100, marker="*", label=f"Projet {base_cp}")
+
+    plt.title("Localisation des acteurs et du projet")
+    plt.xlabel("Longitude")
+    plt.ylabel("Latitude")
+    plt.legend(["Acteurs", "Projet"], loc="lower right")
+    st.pyplot(plt)
+    st.caption("🔵 Acteurs  🔴 Projet")
+
 # ============================================================
 # === INTERFACE STREAMLIT ====================================
 # ============================================================
 
-st.set_page_config(page_title="MOA – distances par CP", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA – distances / contacts", page_icon="📍", layout="wide")
 
-st.title("📍 MOA – distances (remplissage modèle + export simplifié)")
-st.caption("Remplit le modèle à partir de la ligne 11, tolère les CP avec espace et ajoute Catégories / Référent / Contact.")
+st.title("📍 MOA – génération de fichiers")
+mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "🚗 Avec distance"], horizontal=True)
+base_cp = st.text_input("📮 Code postal du projet", placeholder="ex : 33210")
+uploaded_file = st.file_uploader("📄 Fichier CSV à traiter", type=["csv"])
 
-uploaded_file = st.file_uploader("📄 Choisir un fichier CSV", type=["csv"])
-base_address = st.text_input("🏠 Adresse ou code postal de référence", placeholder="Ex : 17 Boulevard Allende 43 260 Langon France ou 43260")
-
-if uploaded_file and base_address:
+if uploaded_file and base_cp:
     try:
         with st.spinner("⏳ Traitement en cours..."):
             df = process_csv_to_moa_df(uploaded_file)
-            df = compute_distances_by_cp(df, base_address)
+
+            if mode == "🚗 Avec distance":
+                df, base_coords, cp_to_coords = compute_distances_by_cp(df, base_cp)
+            else:
+                base_coords, cp_to_coords = None, {}
 
         st.success("✅ Fichier traité avec succès !")
 
-        excel_full = to_excel_in_first_sheet(df, TEMPLATE_PATH, START_ROW)
-        st.download_button(
-            label="⬇️ Télécharger le fichier complet (Sourcing_MOA.xlsx)",
-            data=excel_full,
-            file_name=EXPORT_FILENAME_FULL,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
+        # --- Export simplifié ---
         excel_simple = to_simple_excel(df)
         st.download_button(
             label="⬇️ Télécharger le fichier simplifié (MOA_contact_simple.xlsx)",
@@ -249,9 +261,18 @@ if uploaded_file and base_address:
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
-        found = df["Code postal"].notna().sum()
-        missing = df["Code postal"].isna().sum()
-        st.info(f"📬 {found} codes postaux détectés — {missing} adresses sans CP identifiable.")
+        # --- Export complet et carte ---
+        if mode == "🚗 Avec distance":
+            excel_full = to_excel_in_first_sheet(df, TEMPLATE_PATH, START_ROW)
+            st.download_button(
+                label="⬇️ Télécharger le fichier complet (Sourcing_MOA.xlsx)",
+                data=excel_full,
+                file_name=EXPORT_FILENAME_FULL,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            st.subheader("🗺️ Carte des acteurs et du projet")
+            plot_static_map(df, base_cp, cp_to_coords, base_coords)
 
         st.subheader("📋 Aperçu des données")
         st.dataframe(df.head(12))
