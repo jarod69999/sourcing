@@ -395,6 +395,27 @@ if file and (mode == "🧾 Contact simple" or base_loc):
 
             fmap = make_map(df, base_coords, coords_dict, base_loc)
             htmlb = map_to_html(fmap)
-            st.download_button("📥 Télécharger la carte (HTML)",
-                               data=htmlb, file_name=f"{name_map}.html", mime="
+            st.download_button(
+                "📥 Télécharger la carte (HTML)",
+                data=htmlb,
+                file_name=f"{name_map}.html",
+                mime="text/html"
+            )
+
+            # Affichage carte dans Streamlit
+            st_html(htmlb.getvalue().decode("utf-8"), height=520)
+
+            if used_fallback or not ORS_KEY:
+                st.warning("⚠️ Certaines distances ont été calculées à vol d’oiseau (ORS indisponible pour ces lignes).")
+            else:
+                st.caption("🚗 Distances calculées avec OpenRouteService.")
+
+        st.subheader("📋 Aperçu des données")
+        st.dataframe(df.head(12))
+
+    except Exception as e:
+        import traceback
+        st.error(f"💥 Erreur inattendue : {type(e).__name__}")
+        st.text_area("Détail complet :", traceback.format_exc(), height=300)
+         
 
