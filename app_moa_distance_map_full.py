@@ -9,7 +9,9 @@ import folium
 from folium.features import DivIcon
 from streamlit.components.v1 import html as st_html
 
-# ========================== CONFIG ==========================
+# =========================================================
+# CONFIG GÉNÉRALE
+# =========================================================
 TEMPLATE_PATH = "Sourcing base.xlsx"
 START_ROW = 11
 
@@ -28,9 +30,9 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# =============================================================
-# TABLE CP FR → VILLE (tu peux l’enrichir)
-# =============================================================
+# =========================================================
+# TABLE CP FR → VILLE
+# =========================================================
 POSTAL_TO_CITY = {
     "33210": "Langon",
     "85035": "La Roche-sur-Yon",
@@ -46,9 +48,9 @@ POSTAL_TO_CITY = {
     "42470": "Saint-Symphorien-de-Lay",
 }
 
-# =============================================================
+# =========================================================
 # HELPERS
-# =============================================================
+# =========================================================
 COUNTRY_WORDS = {"france","belgique","belgium","espagne","españa","portugal","italie","italia","deutschland","germany","suisse","switzerland","luxembourg"}
 CP_ANY_RE = re.compile(r"\b[0-9A-Z]{4,7}\b", re.I)
 CP_FR_RE = re.compile(r"\b\d{5}\b")
@@ -65,29 +67,6 @@ def norm(s:str)->str:
 def clean_token(t:str)->str:
     return re.sub(r"\s+", " ", t).strip()
 
-def split_addresses_smart(addr: str) -> list[str]:
-    if not isinstance(addr, str) or addr.strip()=="":
-        return []
-    tokens = [clean_token(t) for t in addr.split(",")]
-    chunks, cur = [], []
-    for tok in tokens:
-        if not tok: continue
-        cur.append(tok)
-        joined = ", ".join(cur)
-        has_cp = bool(CP_ANY_RE.search(joined))
-        has_country = any(w in joined.lower() for w in COUNTRY_WORDS)
-        if has_cp or has_country or len(cur) >= 3:
-            chunks.append(joined)
-            cur = []
-    if cur:
-        chunks.append(", ".join(cur))
-    uniq = []
-    for c in chunks:
-        c2 = clean_token(c)
-        if c2 and c2 not in uniq:
-            uniq.append(c2)
-    return uniq
-
 def first_email_in_text(text:str)->str|None:
     if not isinstance(text,str): return None
     m = EMAIL_RE.search(text)
@@ -100,14 +79,26 @@ def tokens_from_name(name:str)->list[str]:
 def email_local(e:str)->str:
     return e.split("@",1)[0].lower() if isinstance(e,str) else ""
 
-# =============================================================
+def extract_cp_fallback(text: str, country_hint:str=""):
+    if not isinstance(text, str): return ""
+    if country_hint.lower()=="france":
+        m = CP_FR_RE.search(text); 
+        if m: return m.group(0)
+    if country_hint.lower() in ("belgique","belgium"):
+        m = CP_BE_RE.search(text); 
+        if m: return m.group(0)
+    m = CP_ANY_RE.search(text)
+    return m.group(0) if m else ""
+
+# =========================================================
 # GÉOCODAGE & DISTANCES
-# =============================================================
+# =========================================================
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    geolocator = Nominatim(user_agent="moa_geo_v11ter_fix")
+    geolocator = Nominatim(user_agent="moa_geo_v12")
     try:
         time.sleep(1)
+        query = re.sub(r",+", ",", query)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
         if loc:
             addr = loc.raw.get("address", {})
@@ -139,26 +130,15 @@ def distance_km(base_coords, coords):
         d = geodesic(base_coords, coords).km
     return round(d)
 
-def extract_cp_fallback(text: str, country_hint:str=""):
-    if not isinstance(text, str): return ""
-    if country_hint.lower()=="france":
-        m = CP_FR_RE.search(text); 
-        if m: return m.group(0)
-    if country_hint.lower() in ("belgique","belgium"):
-        m = CP_BE_RE.search(text); 
-        if m: return m.group(0)
-    m = CP_ANY_RE.search(text)
-    return m.group(0) if m else ""
-
-# =============================================================
-# DETECTION DES COLONNES & CONTACT MOA
-# =============================================================
+# =========================================================
+# CSV / COLONNES
+# =========================================================
 def find_columns(cols):
     cmap = {}
     norm_map = {norm(c): c for c in cols}
     for key_variants, label in [
         (["raisonsociale","raison","rs"], "raison"),
-        (["categories","categorie","categoires","categ","type"], "categorie"),
+        (["categories","categorie","categ","type"], "categorie"),
         (["referentmoa","referent","referent_moa","refmoa","referentmaitrisedouvrage"], "referent"),
         (["adresse","address","adressepostale","adresses"], "adresse"),
         (["contacts","contact"], "contacts"),
@@ -212,12 +192,8 @@ def choose_contact_moa_from_row(row, colmap):
             if em: return em
         generic = first_email_in_text(text)
         if generic: return generic
-
     return ""
 
-# =============================================================
-# CHARGEMENT CSV ROBUSTE
-# =============================================================
 def process_csv_to_df(csv_bytes):
     try:
         df = pd.read_csv(csv_bytes, sep=None, engine="python")
@@ -226,20 +202,18 @@ def process_csv_to_df(csv_bytes):
 
     colmap = find_columns(df.columns)
     out = pd.DataFrame()
-
     out["Raison sociale"] = df[colmap["raison"]].astype(str).fillna("") if "raison" in colmap else ""
-    out["Référent MOA"]   = df[colmap["referent"]].astype(str).fillna("") if "referent" in colmap else ""
-    out["Catégories"]     = df[colmap["categorie"]].astype(str).fillna("") if "categorie" in colmap else ""
-    out["Adresse"]        = df[colmap["adresse"]].astype(str).fillna("") if "adresse" in colmap else ""
-    out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa_from_row(r, colmap), axis=1)
-
+    out["Référent MOA"] = df[colmap["referent"]].astype(str).fillna("") if "referent" in colmap else ""
+    out["Catégories"] = df[colmap["categorie"]].astype(str).fillna("") if "categorie" in colmap else ""
+    out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("") if "adresse" in colmap else ""
+    out["Contact MOA"] = df.apply(lambda r: choose_contact_moa_from_row(r, colmap), axis=1)
     return out
 
-# =============================================================
-# MULTI-SITES + DISTANCES
-# =============================================================
-def pick_closest_site(addr_field: str, base_coords: tuple[float,float]):
-    candidates = split_addresses_smart(addr_field)
+# =========================================================
+# DISTANCES MULTI-SITES
+# =========================================================
+def pick_closest_site(addr_field: str, base_coords):
+    candidates = [a.strip() for a in str(addr_field).split(",") if a.strip()]
     best = None
     for cand in candidates if candidates else [addr_field]:
         g = geocode(cand) or geocode(cand + ", France")
@@ -255,40 +229,33 @@ def pick_closest_site(addr_field: str, base_coords: tuple[float,float]):
         return best[1], best[2], best[3], best[4]
     return addr_field, None, "", extract_cp_fallback(addr_field)
 
-def compute_distances_multisite(df: pd.DataFrame, base_loc: str):
+def compute_distances_multisite(df, base_loc):
     raw = base_loc.strip()
     if re.fullmatch(r"\d{5}", raw):
         city = POSTAL_TO_CITY.get(raw)
         if city:
             raw = f"{city} {raw}, France"
-
-    base = geocode(raw + ", France") or geocode(raw)
+    query = re.sub(r",+", ",", raw)
+    base = geocode(query) or geocode(query.replace(",", " "))
     if not base:
         st.warning(f"⚠️ Lieu de référence '{base_loc}' non géocodable.")
         df["Pays"] = ""
         df["Code postal"] = df["Adresse"].apply(lambda a: extract_cp_fallback(a))
         df["Distance au projet"] = ""
-        return df, None, {}
+        return df, None, {}, False
 
     base_coords = (base[0], base[1])
-    chosen_coords = {}
-    chosen_rows = []
-    used_fallback = False
-
+    chosen_coords, chosen_rows, used_fallback = {}, [], False
     for _, row in df.iterrows():
         name = row.get("Raison sociale","").strip()
         adresse = row.get("Adresse","")
         kept_addr, coords, country, cp = pick_closest_site(adresse, base_coords)
         if coords:
             d_drive = ors_distance(base_coords, coords)
-            if d_drive is None:
-                used_fallback = True
-                dist = round(geodesic(base_coords, coords).km)
-            else:
-                dist = round(d_drive)
+            dist = round(d_drive) if d_drive else round(geodesic(base_coords, coords).km)
+            used_fallback = used_fallback or (d_drive is None)
         else:
             dist = None
-
         chosen_rows.append({
             "Raison sociale": name,
             "Pays": country or "",
@@ -301,33 +268,39 @@ def compute_distances_multisite(df: pd.DataFrame, base_loc: str):
         })
         if coords:
             chosen_coords[name] = (coords[0], coords[1], country or "")
-
     out = pd.DataFrame(chosen_rows)
     return out, base_coords, chosen_coords, used_fallback
 
-# =============================================================
-# EXCEL + CARTE
-# =============================================================
+# =========================================================
+# EXPORTS
+# =========================================================
 def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
-    wb = load_workbook(template); ws = wb.worksheets[0]
+    wb = load_workbook(template)
+    ws = wb.worksheets[0]
     for i, (_, r) in enumerate(df.iterrows(), start=start):
-        ws.cell(i,1, r.get("Raison sociale",""))
-        ws.cell(i,2, r.get("Pays",""))
-        ws.cell(i,3, r.get("Adresse",""))
-        ws.cell(i,4, r.get("Code postal",""))
-        ws.cell(i,5, r.get("Distance au projet",""))
-        ws.cell(i,6, r.get("Catégories",""))
-        ws.cell(i,7, r.get("Référent MOA",""))
-        ws.cell(i,8, r.get("Contact MOA",""))
+        ws.cell(i,1,r.get("Raison sociale",""))
+        ws.cell(i,2,r.get("Pays",""))
+        ws.cell(i,3,r.get("Adresse",""))
+        ws.cell(i,4,r.get("Code postal",""))
+        ws.cell(i,5,r.get("Distance au projet",""))
+        ws.cell(i,6,r.get("Catégories",""))
+        ws.cell(i,7,r.get("Référent MOA",""))
+        ws.cell(i,8,r.get("Contact MOA",""))
     bio = BytesIO(); wb.save(bio); bio.seek(0); return bio
 
 def to_simple(df):
     bio = BytesIO()
-    df[["Raison sociale","Référent MOA","Contact MOA","Catégories"]].to_excel(bio, index=False)
-    bio.seek(0); return bio
+    df_simple = df[["Raison sociale","Référent MOA","Contact MOA","Catégories"]].copy()
+    df_simple.columns = ["Raison sociale", "Référent MOA (nom)", "Contact MOA (email)", "Catégories"]
+    df_simple.to_excel(bio, index=False)
+    bio.seek(0)
+    return bio
 
+# =========================================================
+# CARTE
+# =========================================================
 def make_map(df, base_coords, coords_dict, base_cp):
-    fmap = folium.Map(location=[46.6, 2.5], zoom_start=5, tiles="CartoDB positron", control_scale=True)
+    fmap = folium.Map(location=[46.6,2.5], zoom_start=5, tiles="CartoDB positron", control_scale=True)
     if base_coords:
         folium.Marker(base_coords, icon=folium.Icon(color="red", icon="star"),
                       popup=f"Projet {base_cp}", tooltip="Projet").add_to(fmap)
@@ -339,9 +312,9 @@ def make_map(df, base_coords, coords_dict, base_cp):
         addr = r.get("Adresse","")
         cp = r.get("Code postal","")
         folium.Marker([lat,lon],
-            icon=folium.Icon(color="blue", icon="industry", prefix="fa"),
-            popup=f"<b>{name}</b><br>{addr}<br>{cp or ''} — {country}",
-            tooltip=name).add_to(fmap)
+                      icon=folium.Icon(color="blue", icon="industry"),
+                      popup=f"<b>{name}</b><br>{addr}<br>{cp or ''} — {country}",
+                      tooltip=name).add_to(fmap)
         folium.map.Marker(
             [lat, lon],
             icon=DivIcon(icon_size=(180,36), icon_anchor=(0,0),
@@ -354,27 +327,27 @@ def map_to_html(fmap):
     s = fmap.get_root().render().encode("utf-8")
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
-# =============================================================
+# =========================================================
 # INTERFACE STREAMLIT
-# =============================================================
-st.title("📍 MOA – v11ter_fix : colonnes manquantes, contacts MOA fiables, distances & carte")
+# =========================================================
+st.title("📍 MOA – v12 : distances fiables, CP détectés, contact MOA email")
 
 mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "🚗 Avec distance & carte"], horizontal=True)
 base_loc = st.text_input("📮 Code postal ou adresse du projet", placeholder="ex : 33210 ou '17 Boulevard Allende, 33210 Langon'")
 file = st.file_uploader("📄 Fichier CSV", type=["csv"])
 
 if mode == "🧾 Contact simple":
-    name_simple = st.text_input("Nom du fichier contact simple (sans extension)", "MOA_contact_simple")
+    name_simple = st.text_input("Nom du fichier contact simple", "MOA_contact_simple")
 else:
-    name_full   = st.text_input("Nom du fichier complet (sans extension)", "Sourcing_MOA")
-    name_simple = st.text_input("Nom du fichier contact simple (sans extension)", "MOA_contact_simple")
-    name_map    = st.text_input("Nom du fichier carte HTML (sans extension)", "Carte_MOA")
+    name_full   = st.text_input("Nom du fichier complet", "Sourcing_MOA")
+    name_simple = st.text_input("Nom du fichier contact simple", "MOA_contact_simple")
+    name_map    = st.text_input("Nom du fichier carte HTML", "Carte_MOA")
 
 if file and (mode == "🧾 Contact simple" or base_loc):
     try:
         with st.spinner("⏳ Traitement en cours..."):
             base_df = process_csv_to_df(file)
-            coords_dict = {}; base_coords = None; used_fallback = False
+            coords_dict, base_coords, used_fallback = {}, None, False
             if mode == "🚗 Avec distance & carte":
                 df, base_coords, coords_dict, used_fallback = compute_distances_multisite(base_df, base_loc)
             else:
@@ -382,16 +355,19 @@ if file and (mode == "🧾 Contact simple" or base_loc):
 
         st.success("✅ Traitement terminé")
 
+        # --- Contact simple
         x1 = to_simple(df if mode=="🧾 Contact simple" else base_df)
-        st.download_button("⬇️ Télécharger le contact simple",
-                           data=x1, file_name=f"{name_simple}.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        st.download_button("⬇️ Télécharger le contact simple", data=x1, file_name=f"{name_simple}.xlsx")
 
+        # --- Mode distance
         if mode == "🚗 Avec distance & carte":
             x2 = to_excel(df)
-            st.download_button("⬇️ Télécharger le fichier complet",
-                               data=x2, file_name=f"{name_full}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            st.download_button(
+                "⬇️ Télécharger le fichier complet",
+                data=x2,
+                file_name=f"{name_full}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
 
             fmap = make_map(df, base_coords, coords_dict, base_loc)
             htmlb = map_to_html(fmap)
@@ -401,12 +377,10 @@ if file and (mode == "🧾 Contact simple" or base_loc):
                 file_name=f"{name_map}.html",
                 mime="text/html"
             )
-
-            # Affichage carte dans Streamlit
             st_html(htmlb.getvalue().decode("utf-8"), height=520)
 
             if used_fallback or not ORS_KEY:
-                st.warning("⚠️ Certaines distances ont été calculées à vol d’oiseau (ORS indisponible pour ces lignes).")
+                st.warning("⚠️ Certaines distances ont été calculées à vol d’oiseau (ORS indisponible pour certaines lignes).")
             else:
                 st.caption("🚗 Distances calculées avec OpenRouteService.")
 
@@ -417,5 +391,6 @@ if file and (mode == "🧾 Contact simple" or base_loc):
         import traceback
         st.error(f"💥 Erreur inattendue : {type(e).__name__}")
         st.text_area("Détail complet :", traceback.format_exc(), height=300)
+      
          
 
