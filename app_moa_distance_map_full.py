@@ -421,6 +421,9 @@ if file and (mode == "🧾 Contact simple" or base_loc):
         st.dataframe(df.head(12))
 
     except Exception as e:
-        st.error(f"Erreur : {e}")
+        import traceback
+        st.error(f"💥 Erreur inattendue : {type(e).__name__}")
+        st.text_area("Détail complet de l’erreur :", traceback.format_exc(), height=300)
+
 
 
