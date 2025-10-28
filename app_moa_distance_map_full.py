@@ -15,7 +15,12 @@ from streamlit.components.v1 import html as st_html
 
 TEMPLATE_PATH = "Sourcing base.xlsx"
 START_ROW = 11
-ORS_KEY = st.secrets["api"]["ORS_KEY"]
+
+# Lecture clé ORS (priorité : secrets.toml → variable d'environnement)
+try:
+    ORS_KEY = st.secrets["api"]["ORS_KEY"]
+except Exception:
+    ORS_KEY = os.getenv("ORS_KEY", "")
 
 # style hors-site conseil
 PRIMARY = "#0b1d4f"
@@ -42,7 +47,7 @@ def extract_postcode(text:str)->str|None:
 
 @st.cache_data(show_spinner=False)
 def geocode(query:str):
-    geolocator=Nominatim(user_agent="moa_geo_v9")
+    geolocator=Nominatim(user_agent="moa_geo_v9bis")
     try:
         time.sleep(1)
         loc=geolocator.geocode(query,timeout=12,addressdetails=True)
@@ -60,6 +65,8 @@ def geocode(query:str):
 
 def ors_distance(coord1, coord2):
     """Retourne distance routière en km via ORS (ou None)."""
+    if not ORS_KEY:
+        return None
     url="https://api.openrouteservice.org/v2/directions/driving-car"
     headers={"Authorization":ORS_KEY,"Content-Type":"application/json"}
     data={"coordinates":[[coord1[1],coord1[0]],[coord2[1],coord2[0]]]}
@@ -209,7 +216,7 @@ def map_to_html(fmap):
 # === INTERFACE ==============================================
 # ============================================================
 
-st.title("📍 MOA – distances routières & cartes (v9)")
+st.title("📍 MOA – distances routières & cartes (v9bis)")
 mode=st.radio("Choisir le mode :",["🧾 Contact simple","🚗 Avec distance & carte"],horizontal=True)
 base_cp=st.text_input("📮 Code postal du projet",placeholder="ex : 33210")
 file=st.file_uploader("📄 Fichier CSV",type=["csv"])
@@ -247,6 +254,9 @@ if file and (mode=="🧾 Contact simple" or base_cp):
 
         st.subheader("📋 Aperçu des données")
         st.dataframe(df.head(10))
+
+        if mode=="🚗 Avec distance & carte":
+            st.caption("🚗 Distances calculées via OpenRouteService (ou à vol d’oiseau si indisponible).")
 
     except Exception as e:
         st.error(f"Erreur : {e}")
