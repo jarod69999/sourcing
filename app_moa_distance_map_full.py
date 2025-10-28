@@ -31,18 +31,14 @@ st.markdown(f"""
 
 # ====================== GEO & HELPERS =======================
 COUNTRY_WORDS = {"france","belgique","belgium","espagne","españa","portugal","italie","italia","deutschland","germany","suisse","switzerland","luxembourg"}
-
-# CP europe "large" : 4-7 alphanum (B-1000, 28013, 75008, 85035, 43260, E-08002, etc.)
 CP_FALLBACK_RE = re.compile(r"\b[0-9A-Z]{4,7}\b", re.I)
 
 def clean_token(t:str)->str:
     return re.sub(r"\s+", " ", t).strip()
 
 def split_addresses_smart(addr: str) -> list[str]:
-    """Découpe une cellule avec plusieurs adresses séparées par des virgules,
-    sans casser les sous-parties (rue, ville, pays). Heuristique :
-    - on accumule des tokens jusqu'à détecter un CP ou un pays → on valide une adresse
-    - à défaut, on limite à 3 tokens par adresse pour avancer.
+    """Découpe une cellule multi-adresses séparées par des virgules, sans casser rue/ville/pays.
+       Heuristique: on accumule jusqu'à détecter CP ou pays, sinon on coupe tous les ~3 tokens.
     """
     if not isinstance(addr, str) or addr.strip()=="":
         return []
@@ -60,7 +56,6 @@ def split_addresses_smart(addr: str) -> list[str]:
             cur = []
     if cur:
         chunks.append(", ".join(cur))
-    # nettoie doublons / vides
     uniq = []
     for c in chunks:
         c2 = clean_token(c)
@@ -71,7 +66,7 @@ def split_addresses_smart(addr: str) -> list[str]:
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
     """Nominatim geocode with addressdetails; returns (lat, lon, country, postcode or None)."""
-    geolocator = Nominatim(user_agent="moa_geo_v10")
+    geolocator = Nominatim(user_agent="moa_geo_v11")
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
@@ -85,27 +80,32 @@ def geocode(query: str):
     return None
 
 def ors_distance(coord1, coord2):
-    """Driving distance in km via OpenRouteService; None on failure."""
+    """Driving distance in km via ORS; None on failure."""
     if not ORS_KEY:
         return None
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
     headers = {"Authorization": ORS_KEY, "Content-Type": "application/json"}
-    data = {"coordinates": [[coord1[1], coord1[0]], [coord2[1], coord2[0]]]}
+    data = {"coordinates": [[coord1[1],coord1[0]],[coord2[1],coord2[0]]]}
     try:
         r = requests.post(url, json=data, headers=headers, timeout=25)
         if r.status_code == 200:
             js = r.json()
-            return js["routes"][0]["summary"]["distance"] / 1000.0
+            return js["routes"][0]["summary"]["distance"]/1000.0
     except Exception:
         pass
     return None
 
 def distance_km(base_coords, coords):
-    """Try ORS, fallback to geodesic; rounded to km."""
+    """Try ORS, fallback geodesic; rounded to km."""
     d = ors_distance(base_coords, coords)
     if d is None:
         d = geodesic(base_coords, coords).km
     return round(d)
+
+def extract_cp_fallback(text: str):
+    if not isinstance(text, str): return None
+    m = CP_FALLBACK_RE.search(text)
+    return m.group(0) if m else None
 
 # ====================== CSV → DF (base) =====================
 def _find_columns(cols):
@@ -115,63 +115,103 @@ def _find_columns(cols):
         if "raison" in cl and "sociale" in cl: res["raison"]=c
         elif "catég" in cl or "categorie" in cl: res["categorie"]=c
         elif ("référent" in cl and "moa" in cl) or ("referent" in cl and "moa" in cl): res["referent"]=c
-        elif ("email" in cl and "referent" in cl) or ("email" in cl and "référent" in cl): res["email_referent"]=c
         elif "contacts" in cl: res["contacts"]=c
         elif "adress" in cl: res["adresse"]=c
+        elif cl=="tech": res["Tech"]=c
+        elif cl=="dir":  res["Dir"]=c
+        elif cl=="comce":res["Comce"]=c
+        elif cl=="com":  res["Com"]=c
+        # si d'autres postes existent plus tard, on pourra les ajouter ici
     return res
 
-def _derive_contact(row, colmap):
-    import re as _re
-    email=None
-    if "email_referent" in colmap:
-        v=row.get(colmap["email_referent"],"")
-        if isinstance(v,str) and "@" in v: email=v.strip()
-    if not email and "contacts" in colmap:
-        raw=str(row.get(colmap["contacts"],""))
-        emails=_re.split(r"[,\s;]+",raw)
-        emails=[e.strip().rstrip(".,;") for e in emails if "@" in e]
-        name=str(row.get(colmap.get("referent",""),"")).strip()
-        tokens=[t for t in _re.split(r"[\s\-]+",name.lower()) if t]
-        best=None
-        for e in emails:
-            local=e.split("@",1)[0].lower()
-            score=sum(tok in local for tok in tokens if len(tok)>=2)
-            if best is None or score>best[0]: best=(score,e)
-        if best and best[0]>0: email=best[1]
-        elif emails: email=emails[0]
-    return email or ""
+def _first_email_in_text(text:str)->str|None:
+    if not isinstance(text,str): return None
+    emails = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text)
+    return emails[0] if emails else None
+
+def _email_local(e:str)->str:
+    return e.split("@",1)[0].lower() if isinstance(e,str) else ""
+
+def _tokens(name:str)->list[str]:
+    if not isinstance(name,str): return []
+    return [t for t in re.split(r"[\s\-]+", name.lower()) if len(t)>=2]
+
+def choose_contact_moa(row, colmap):
+    """Choisit l'email MOA à partir des colonnes Tech/Dir/Comce/Com en comparant avec 'Référent MOA'.
+       Si pas de match → priorité Tech → Dir → Comce → Com.
+       Si tout vide → fallback sur 'Contacts' générique (premier email).
+    """
+    referent = str(row.get("Référent MOA",""))
+    toks = _tokens(referent)
+
+    # récupère candidats
+    cands = {}
+    for k in ["Tech","Dir","Comce","Com"]:
+        col = colmap.get(k)
+        if col:
+            val = str(row.get(col,"")).strip()
+            if val:
+                # autoriser "Nom <email>" ou juste email
+                em = _first_email_in_text(val) or val if "@" in val else None
+                if em:
+                    cands[k]=em
+
+    # 1) tentative de match par nom du référent dans la partie locale de l'email
+    best_key = None; best_score = -1
+    for k, em in cands.items():
+        local = _email_local(em)
+        score = sum(t in local for t in toks) if toks else 0
+        if score > best_score:
+            best_score = score; best_key = k
+    if best_key and best_score>0:
+        return cands[best_key]
+
+    # 2) priorité par défaut
+    for k in ["Tech","Dir","Comce","Com"]:
+        if k in cands:
+            return cands[k]
+
+    # 3) fallback: colonne 'Contacts'
+    contacts_col = colmap.get("contacts")
+    if contacts_col:
+        fallback = _first_email_in_text(str(row.get(contacts_col,"")))
+        if fallback:
+            return fallback
+
+    return ""
 
 def process_csv_to_df(csv_bytes):
+    # charge CSV
     try:
         df = pd.read_csv(csv_bytes, sep=None, engine="python")
     except Exception:
         df = pd.read_csv(csv_bytes, sep=";", engine="python")
+
     colmap = _find_columns(df.columns)
     out = pd.DataFrame()
     out["Raison sociale"] = df[colmap.get("raison","")].astype(str).fillna("")
     out["Référent MOA"]   = df[colmap.get("referent","")].astype(str).fillna("")
-    out["Contact MOA"]    = df.apply(lambda r:_derive_contact(r,colmap),axis=1)
     out["Catégories"]     = df[colmap.get("categorie","")].astype(str).fillna("")
     out["Adresse"]        = df[colmap.get("adresse","")].astype(str).fillna("")
+
+    # Contact MOA selon v11
+    out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
     return out
 
 # =========== Multi-implantations → site le plus proche =====
 def pick_closest_site(addr_field: str, base_coords: tuple[float,float]):
     """Retourne (adresse_retenue, (lat,lon), pays, cp) en testant chaque implantation.
-       Split par virgule avec heuristiques, géocode chaque candidat, choisit le plus proche.
+       Split par virgules (heuristique), géocode chaque candidat, choisit le plus proche.
     """
     candidates = split_addresses_smart(addr_field)
     best = None  # (dist_km, addr, (lat,lon), country, cp)
     for cand in candidates if candidates else [addr_field]:
         q = cand
-        g = geocode(q)
-        if not g:
-            # réessaie en forçant “France” si rien
-            g = geocode(q + ", France")
+        g = geocode(q) or geocode(q + ", France")
         if not g:
             continue
         lat, lon, country, postcode = g
-        # force France si CP FR à 5 chiffres (CEDEX inclus)
+        # force France si CP FR à 5 chiffres (incl. CEDEX)
         if country != "France" and postcode and re.match(r"^\d{5}$", str(postcode)):
             country = "France"
         d = distance_km(base_coords, (lat, lon))
@@ -182,24 +222,19 @@ def pick_closest_site(addr_field: str, base_coords: tuple[float,float]):
     # aucun géocode → on rend l’adresse brute
     return addr_field, None, "", extract_cp_fallback(addr_field)
 
-def extract_cp_fallback(text: str):
-    if not isinstance(text, str): return None
-    m = CP_FALLBACK_RE.search(text)
-    return m.group(0) if m else None
-
 def compute_distances_multisite(df: pd.DataFrame, base_loc: str):
     # géocode projet (CP ou ville)
     base = geocode(base_loc + ", France") or geocode(base_loc)
     if not base:
         st.warning(f"⚠️ Lieu de référence '{base_loc}' non géocodable.")
-        df["Pays"] = ""
-        df["Code postal"] = df["Adresse"].apply(extract_cp_fallback)
-        df["Distance au projet"] = ""
-        df["Adresse retenue"] = df["Adresse"]
-        return df, None, {}
+        df2 = df.copy()
+        df2["Pays"] = ""
+        df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
+        df2["Distance au projet"] = ""
+        return df2, None, {}
 
     base_coords = (base[0], base[1])
-    chosen_coords = {}   # clé = (raison sociale), valeur = (lat,lon,country)
+    chosen_coords = {}   # clé = Raison sociale, valeur = (lat,lon,country)
     chosen_rows = []
 
     for _, row in df.iterrows():
@@ -215,7 +250,7 @@ def compute_distances_multisite(df: pd.DataFrame, base_loc: str):
             "Distance au projet": dist,
             "Catégories": row.get("Catégories",""),
             "Référent MOA": row.get("Référent MOA",""),
-            "Contact MOA": row.get("Contact MOA","")
+            "Contact MOA": row.get("Contact MOA",""),
         })
         if coords:
             chosen_coords[name] = (coords[0], coords[1], country or "")
@@ -226,7 +261,7 @@ def compute_distances_multisite(df: pd.DataFrame, base_loc: str):
 # ========================= EXCEL ============================
 def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
     wb = load_workbook(template); ws = wb.worksheets[0]
-    # vide à partir de start
+    # vide à partir de start (8 colonnes standard)
     max_cols = 8
     for r in range(start, ws.max_row+1):
         for c in range(1, max_cols+1):
@@ -279,7 +314,7 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
-st.title("📍 MOA – multi-sites, distances routières & carte (v10)")
+st.title("📍 MOA – v11 : multi-sites, contact MOA par poste, distances & carte")
 
 mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "🚗 Avec distance & carte"], horizontal=True)
 base_cp = st.text_input("📮 Code postal (ou ville) du projet", placeholder="ex : 33210")
@@ -300,19 +335,18 @@ if file and (mode == "🧾 Contact simple" or base_cp):
             if mode == "🚗 Avec distance & carte":
                 df, base_coords, coords_dict = compute_distances_multisite(base_df, base_cp)
             else:
-                # en mode simple, on ne calcule pas les distances; on garde le tableau contact simple
                 df = base_df.copy()
 
         st.success("✅ Traitement terminé")
 
-        # Export contact simple (toujours dispo)
+        # Export contact simple
         x1 = to_simple(df if mode=="🧾 Contact simple" else base_df)
         st.download_button("⬇️ Télécharger le contact simple",
                            data=x1, file_name=f"{name_simple}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         if mode == "🚗 Avec distance & carte":
-            # Excel complet (avec site retenu)
+            # Excel complet (site retenu + contact MOA choisi)
             x2 = to_excel(df)
             st.download_button("⬇️ Télécharger le fichier complet",
                                data=x2, file_name=f"{name_full}.xlsx",
@@ -323,16 +357,15 @@ if file and (mode == "🧾 Contact simple" or base_cp):
             st.download_button("📥 Télécharger la carte (HTML)",
                                data=htmlb, file_name=f"{name_map}.html", mime="text/html")
             st_html(htmlb.getvalue().decode("utf-8"), height=520)
-            # Info sur le moteur de distance
+
             if not ORS_KEY:
                 st.warning("⚠️ Clé OpenRouteService absente : distances à vol d’oiseau utilisées en secours.")
             else:
                 st.caption("🚗 Distances calculées avec OpenRouteService (fallback géodésique si l’API est indisponible).")
 
-        st.subheader("📋 Aperçu des données (site retenu le plus proche)" if mode=="🚗 Avec distance & carte" else "📋 Aperçu des données")
+        st.subheader("📋 Aperçu des données")
         st.dataframe(df.head(12))
 
     except Exception as e:
         st.error(f"Erreur : {e}")
-
 
