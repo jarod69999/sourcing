@@ -129,27 +129,57 @@ def find_columns(cols):
         if "techemail" in n and "Tech" not in cmap: cmap["Tech"]=col
     return cmap
 
-def choose_contact_moa_from_row(row,colmap):
+
+def choose_contact_moa_from_row(row, colmap):
+    """
+    Règle :
+    - si 'Référent MOA' contient 'direction/dir' → colonne Dir
+      'technique/tech' → Tech ; 'commercial/commerce/comce' → Comce ; 'communication/comm' → Com
+    - sinon priorité : Tech → Dir → Comce → Com
+    - sinon fallback : premier email trouvé dans 'Contacts'
+    """
     ref_val = str(row.get(colmap.get("referent",""),"")).lower()
-    def pick(k): 
-        c = colmap.get(k); 
-        return _first_email(str(row.get(c,""))) if c else None
+
+    def pick(k):
+        c = colmap.get(k)
+        if not c:
+            return None
+        return _first_email(str(row.get(c,"")))
+
+    # Routage par mots-clés du référent
     if any(k in ref_val for k in ["direction","dir"]):
-        e = pick("Dir");  if e: return e
+        e = pick("Dir")
+        if e:
+            return e
     if any(k in ref_val for k in ["technique","tech"]):
-        e = pick("Tech"); if e: return e
-    if any(k in ref_val for k in ["commercial","comce"]):
-        e = pick("Comce");if e: return e
+        e = pick("Tech")
+        if e:
+            return e
+    if any(k in ref_val for k in ["commercial","commerce","comce"]):
+        e = pick("Comce")
+        if e:
+            return e
     if any(k in ref_val for k in ["communication","comm"]):
-        e = pick("Com");  if e: return e
+        e = pick("Com")
+        if e:
+            return e
+
+    # Priorité par défaut
     for k in ["Tech","Dir","Comce","Com"]:
         e = pick(k)
-        if e: return e
-    ccol = colmap.get("contacts")
-    if ccol:
-        e = _first_email(str(row.get(ccol,"")))
-        if e: return e
+        if e:
+            return e
+
+    # Fallback 'Contacts'
+    contacts_col = colmap.get("contacts")
+    if contacts_col:
+        e = _first_email(str(row.get(contacts_col,"")))
+        if e:
+            return e
+
     return ""
+
+
 
 # =========================================================
 # TRAITEMENT CSV
