@@ -320,28 +320,56 @@ def to_simple_contact(df_like):
     df.to_excel(b, index=False)
     b.seek(0)
     return b
-
+    
 def make_map(df, base_coords, coords_dict, base_label):
+    """
+    Génère la carte Folium en ignorant les points non géocodés (lat/lon None).
+    """
     fmap = folium.Map(location=[46.6, 2.5], zoom_start=5, tiles="CartoDB positron", control_scale=True)
-    if base_coords:
-        folium.Marker(base_coords, icon=folium.Icon(color="red", icon="star"),
-                      popup=f"Projet {base_label}", tooltip="Projet").add_to(fmap)
+
+    # Marqueur du projet
+    if base_coords and all(base_coords):
+        folium.Marker(
+            base_coords,
+            icon=folium.Icon(color="red", icon="star"),
+            popup=f"Projet {base_label}",
+            tooltip="Projet",
+        ).add_to(fmap)
+
+    # Marqueurs des entreprises
     for _, r in df.iterrows():
         name = r.get("Raison sociale", "")
         c = coords_dict.get(name)
-        if not c: continue
+        if not c:
+            continue
+
         lat, lon, country = c
-        addr = r.get("Adresse", "")
+
+        # 🧱 skip si pas de coordonnées valides
+        if lat is None or lon is None:
+            continue
+
+        addr = r.get("Adresse", "(adresse non précisée)")
         cp = r.get("Code postal", "")
-        folium.Marker([lat, lon],
-                      icon=folium.Icon(color="blue", icon="industry"),
-                      popup=f"<b>{name}</b><br>{addr}<br>{cp} – {country}",
-                      tooltip=name).add_to(fmap)
-        folium.map.Marker([lat, lon],
-                          icon=DivIcon(icon_size=(180, 36), icon_anchor=(0, 0),
-                                       html=f'<div style="font-weight:600;color:#1f6feb;white-space:nowrap;text-shadow:0 0 3px #fff;">{name}</div>')
-                          ).add_to(fmap)
+        folium.Marker(
+            [lat, lon],
+            icon=folium.Icon(color="blue", icon="industry"),
+            popup=f"<b>{name}</b><br>{addr}<br>{cp} – {country}",
+            tooltip=name,
+        ).add_to(fmap)
+
+        folium.map.Marker(
+            [lat, lon],
+            icon=DivIcon(
+                icon_size=(180, 36),
+                icon_anchor=(0, 0),
+                html=f'<div style="font-weight:600;color:#1f6feb;white-space:nowrap;text-shadow:0 0 3px #fff;">{name}</div>',
+            ),
+        ).add_to(fmap)
+
     return fmap
+
+
 
 def map_to_html(fmap):
     s = fmap.get_root().render().encode("utf-8")
