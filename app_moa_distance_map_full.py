@@ -183,26 +183,44 @@ def find_columns(cols):
     return cmap
 
 def choose_contact_moa_from_row(row, colmap):
+    """
+    Sélectionne automatiquement le bon contact MOA selon le poste du référent.
+    """
     ref_val = str(row.get(colmap.get("referent", ""), "")).lower()
+
     def pick(k):
         c = colmap.get(k)
-        if not c: return None
+        if not c:
+            return None
         return _first_email(str(row.get(c, "")))
+
+    # Logique par mots-clés dans le référent
     for keyset, emailtype in [
-    (["direction", "dir"], "Dir"),
-    (["technique", "tech"], "Tech"),
-    (["commercial", "commerce", "comce"], "Comce"),
-    (["communication", "comm"], "Com"),
-]:
-    if any(k in ref_val for k in keyset):
-        e = pick(emailtype)
+        (["direction", "dir"], "Dir"),
+        (["technique", "tech"], "Tech"),
+        (["commercial", "commerce", "comce"], "Comce"),
+        (["communication", "comm"], "Com"),
+    ]:
+        if any(k in ref_val for k in keyset):
+            e = pick(emailtype)
+            if e:
+                return e
+
+    # Sinon, on teste les colonnes disponibles par priorité
+    for k in ["Tech", "Dir", "Comce", "Com"]:
+        e = pick(k)
         if e:
             return e
+
+    # En dernier recours, on tente la colonne "Contacts"
     contacts_col = colmap.get("contacts")
     if contacts_col:
         e = _first_email(str(row.get(contacts_col, "")))
-        if e: return e
+        if e:
+            return e
+
     return ""
+
 
 # =========================================================
 # CSV / DF
