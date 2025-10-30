@@ -65,26 +65,28 @@ def extract_cp_fallback(text: str):
     m = CP_FR_RE.search(text)
     return m.group(0) if m else ""
 
-# ===========================
-# GEO
-# ===========================
+# =========================================================
+# GÉOCODAGE (corrigé v18)
+# =========================================================
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
     """
-    Retourne (lat, lon, country, postcode) ou None
+    Géocodage robuste + fallback interne pour codes postaux connus.
+    Retourne (lat, lon, country, postcode, full_address)
     """
     if not isinstance(query, str) or not query.strip():
         return None
 
     query = query.strip()
     cp_match = CP_FR_RE.search(query)
-    if cp_match:
-        cp = cp_match.group(0)
-        if cp in POSTAL_TO_COORDS:
-            lat, lon, country = POSTAL_TO_COORDS[cp]
-            return (lat, lon, country, cp)
+    postcode_guess = cp_match.group(0) if cp_match else None
 
-    geolocator = Nominatim(user_agent="moa_geo_v17")
+    # Si CP connu dans le fallback
+    if postcode_guess in POSTAL_TO_COORDS:
+        lat, lon, country = POSTAL_TO_COORDS[postcode_guess]
+        return (lat, lon, country, postcode_guess, query)
+
+    geolocator = Nominatim(user_agent="moa_geo_v18")
     q = re.sub(r",+", ",", query)
     q = re.sub(r"\s+", " ", q)
     is_fr = bool(cp_match)
@@ -107,40 +109,46 @@ def geocode(query: str):
             loc = geolocator.geocode(t, timeout=15, addressdetails=True, country_codes="fr" if is_fr else None)
             if loc:
                 addr = loc.raw.get("address", {})
-                return (
-                    loc.latitude,
-                    loc.longitude,
-                    addr.get("country", "France"),
-                    addr.get("postcode", cp_match.group(0) if cp_match else None),
-                )
+                cp = addr.get("postcode") or postcode_guess or extract_cp_fallback(query)
+                full = ", ".join(
+                    [addr.get(k, "") for k in ["road", "city", "postcode"] if addr.get(k)]
+                ).strip(", ")
+                return (loc.latitude, loc.longitude, addr.get("country", "France"), cp, full or query)
         except Exception:
             continue
 
-    # fallback CP connu
-    if cp_match and cp_match.group(0) in POSTAL_TO_COORDS:
-        lat, lon, country = POSTAL_TO_COORDS[cp_match.group(0)]
-        return (lat, lon, country, cp_match.group(0))
+    # si rien trouvé, mais code postal FR connu → fallback coordonnées approximatives
+    if postcode_guess in POSTAL_TO_COORDS:
+        lat, lon, country = POSTAL_TO_COORDS[postcode_guess]
+        return (lat, lon, country, postcode_guess, query)
+
     return None
 
-def ors_distance(a, b):
-    """Distance routière (km) via OpenRouteService; None si indispo."""
-    if not ORS_KEY: return None
-    url = "https://api.openrouteservice.org/v2/directions/driving-car"
-    headers = {"Authorization": ORS_KEY, "Content-Type": "application/json"}
-    data = {"coordinates": [[a[1], a[0]], [b[1], b[0]]]}
-    try:
-        r = requests.post(url, json=data, headers=headers, timeout=25)
-        if r.status_code == 200:
-            return r.json()["routes"][0]["summary"]["distance"] / 1000.0
-    except Exception:
-        pass
-    return None
 
-def distance_km(a, b):
-    d = ors_distance(a, b)
-    if d is None:
-        d = geodesic(a, b).km
-    return round(d)
+# =========================================================
+# SITE LE + PROCHE (corrigé v18)
+# =========================================================
+def pick_closest_site(addr_field, base_coords):
+    """
+    Sélectionne l'adresse la plus proche du projet parmi les implantations,
+    et assure un retour propre avec adresse + CP même si géocodage partiel.
+    """
+    candidates = [a.strip() for a in str(addr_field).split(",") if a.strip()]
+    best = None
+    for c in candidates if candidates else [addr_field]:
+        g = geocode(c) or geocode(c + ", France")
+        if not g:
+            continue
+        lat, lon, country, cp, full = g
+        cp = cp or extract_cp_fallback(c)
+        d = distance_km(base_coords, (lat, lon))
+        if best is None or d < best[0]:
+            best = (d, full or c, (lat, lon), country, cp)
+
+    # Aucun géocodage concluant → garder l’adresse brute
+    if best:
+        return best[1], best[2], best[3], best[4]
+    return addr_field, None, "France", extract_cp_fallback(addr_field)
 
 # ===========================
 # COLONNES & EMAIL
