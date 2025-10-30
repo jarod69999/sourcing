@@ -59,37 +59,29 @@ def _first_email(text: str) -> str | None:
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
     """
-    Géocode via Nominatim (tolérant aux inversions CP/Ville).
+    Géocodage via OpenRouteService (fiable et tolérant).
     Retourne (lat, lon, country) ou None.
     """
     if not isinstance(query, str) or not query.strip():
         return None
+    if not ORS_KEY:
+        st.warning("⚠️ Clé ORS absente : géocodage désactivé.")
+        return None
 
-    geolocator = Nominatim(user_agent="moa_geo_v22_tolerant")
-    tries = []
-
-    q = query.strip()
-    if "france" not in q.lower():
-        q = q + ", France"
-    tries.append(q)
-
-    # inversions possibles CP/Ville
-    m = re.search(r"\b(\d{4,6})\b\s*([A-Za-zÀ-ÿ' -]+)", q)
-    if m:
-        cp, ville = m.group(1).strip(), m.group(2).strip()
-        tries += [f"{ville} {cp}, France", f"{ville}, {cp}, France", f"{cp}, France"]
-
-    for t in tries:
-        try:
-            time.sleep(1)
-            loc = geolocator.geocode(t, timeout=12, addressdetails=True)
-            if loc:
-                addr = loc.raw.get("address", {})
-                country = addr.get("country", "France")
-                return (loc.latitude, loc.longitude, country)
-        except Exception:
-            continue
-
+    url = "https://api.openrouteservice.org/geocode/search"
+    params = {"api_key": ORS_KEY, "text": query + ", France", "boundary.country": "FR", "size": 1}
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code == 200:
+            js = r.json()
+            feats = js.get("features", [])
+            if feats:
+                coords = feats[0]["geometry"]["coordinates"]
+                props = feats[0].get("properties", {})
+                country = props.get("country", "France")
+                return (coords[1], coords[0], country)
+    except Exception:
+        pass
     return None
 
 # =========================================================
