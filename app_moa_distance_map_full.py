@@ -10,6 +10,8 @@ import folium
 from folium.features import DivIcon
 from streamlit.components.v1 import html as st_html
 
+# ✅ clé ORS directement dans le code
+ORS_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjVlMDYzYWQzMDEzZjQ5ZGJiODE5NThhYTBiZjNjY2FlIiwiaCI6Im11cm11cjY0In0="
 # =========================================================
 # CONFIG
 # =========================================================
