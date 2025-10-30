@@ -1,4 +1,4 @@
-# app_moa_distance_map_full_v20.py
+# app_moa_distance_map_full_v21.py
 import streamlit as st
 import pandas as pd
 import re, os, time, unicodedata, requests
@@ -66,13 +66,13 @@ def extract_cp_fallback(text: str):
     return m.group(0) if m else ""
 
 # =========================================================
-# GÉOCODAGE (v20 corrigé)
+# GÉOCODAGE ROBUSTE (v21)
 # =========================================================
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
     """
-    Géocodage robuste + fallback interne pour codes postaux connus.
-    Retourne (lat, lon, country, postcode, full_address propre)
+    Géocodage robuste : tente Nominatim, puis fallback CP → coordonnée approximative.
+    Retourne (lat, lon, country, postcode, full_address)
     """
     if not isinstance(query, str) or not query.strip():
         return (None, None, "France", "", "(adresse non précisée)")
@@ -81,58 +81,40 @@ def geocode(query: str):
     cp_match = CP_FR_RE.search(query)
     postcode_guess = cp_match.group(0) if cp_match else None
 
-    # Si code postal connu → coordonnées fixes
+    # --- fallback direct sur code postal connu ---
     if postcode_guess in POSTAL_TO_COORDS:
         lat, lon, country = POSTAL_TO_COORDS[postcode_guess]
-        return (lat, lon, country, postcode_guess, query)
+        return (lat, lon, country, postcode_guess, f"{postcode_guess}, France")
 
-    geolocator = Nominatim(user_agent="moa_geo_v20")
-    q = re.sub(r",+", ",", query)
-    q = re.sub(r"\s+", " ", q)
-    is_fr = bool(cp_match)
-    tries = []
+    # --- Essai via Nominatim ---
+    try:
+        geolocator = Nominatim(user_agent="moa_geo_v21", timeout=10)
+        loc = geolocator.geocode(query + ", France", addressdetails=True, country_codes="fr")
+        if loc:
+            addr = loc.raw.get("address", {})
+            cp = addr.get("postcode") or postcode_guess or extract_cp_fallback(query)
+            parts = [
+                addr.get("house_number", ""),
+                addr.get("road", ""),
+                addr.get("city", "") or addr.get("town", "") or addr.get("village", ""),
+                cp or "",
+                addr.get("country", "France"),
+            ]
+            full = ", ".join([p for p in parts if p])
+            if not full or full.strip() in {", France", "France", ",", ""}:
+                full = query
+            return (loc.latitude, loc.longitude, addr.get("country", "France"), cp, full)
+    except Exception:
+        pass
 
-    if "france" not in q.lower():
-        tries.append(q + ", France")
-    tries.append(q)
+    # --- Si tout échoue : fallback sur CP partiel ---
+    cp = postcode_guess or extract_cp_fallback(query)
+    if cp and cp in POSTAL_TO_COORDS:
+        lat, lon, country = POSTAL_TO_COORDS[cp]
+        return (lat, lon, country, cp, f"{cp}, France")
 
-    if is_fr and cp_match:
-        cp = cp_match.group(0)
-        m = re.search(r"\b(\d{5})\b\s+([A-Za-zÀ-ÿ' \-]+)", q)
-        if m:
-            cp, ville = m.group(1), m.group(2).strip()
-            tries += [f"{ville} {cp}, France", f"{ville}, {cp}, France", f"{cp} {ville}, France"]
-
-    for t in tries:
-        try:
-            time.sleep(0.6)
-            loc = geolocator.geocode(t, timeout=15, addressdetails=True, country_codes="fr" if is_fr else None)
-            if loc:
-                addr = loc.raw.get("address", {})
-                cp = addr.get("postcode") or postcode_guess or extract_cp_fallback(query)
-                # Construction lisible
-                parts = [
-                    addr.get("house_number", ""),
-                    addr.get("road", ""),
-                    addr.get("city", "") or addr.get("town", "") or addr.get("village", ""),
-                    cp or "",
-                    addr.get("country", "France")
-                ]
-                full = ", ".join([p for p in parts if p])
-                # Fallback si vide
-                if not full or full.strip() in {", France", "France", ",", ""}:
-                    full = query or "(adresse non précisée)"
-                return (loc.latitude, loc.longitude, addr.get("country", "France"), cp, full)
-        except Exception:
-            continue
-
-    # Fallback CP connu
-    if postcode_guess in POSTAL_TO_COORDS:
-        lat, lon, country = POSTAL_TO_COORDS[postcode_guess]
-        return (lat, lon, country, postcode_guess, query or "(adresse non précisée)")
-
-    # Échec complet
-    return (None, None, "France", extract_cp_fallback(query), query or "(adresse non précisée)")
+    # --- sinon on met une valeur par défaut pour garder la ligne exploitable ---
+    return (None, None, "France", cp or "", query or "(adresse non précisée)")
 
 # =========================================================
 # DISTANCES
@@ -157,44 +139,43 @@ def distance_km(a, b):
     return round(d)
 
 # =========================================================
-# COLONNES / EMAIL
+# CSV / DF
 # =========================================================
+def read_csv_smart(file_like):
+    try:
+        return pd.read_csv(file_like, sep=None, engine="python")
+    except Exception:
+        file_like.seek(0)
+        return pd.read_csv(file_like, sep=";", engine="python")
+
 def find_columns(cols):
     cmap = {}
     norm_map = {_norm(c): c for c in cols}
-    base_keys = [
+    for variants, key in [
         (["raisonsociale", "raison", "rs"], "raison"),
         (["referentmoa", "referent", "refmoa"], "referent"),
         (["adresse", "address", "adressepostale"], "adresse"),
+        (["categorieid", "categorie-id", "categorie_id", "categoryid"], "categorie_id"),
         (["contacts", "contact"], "contacts"),
-    ]
-    for vs, label in base_keys:
-        for v in vs:
-            if v in norm_map and label not in cmap:
-                cmap[label] = norm_map[v]
-
-    for cand in ["categorieid", "categorie-id", "categorie_id", "categoryid", "category-id"]:
-        if cand in norm_map:
-            cmap["categorie_id"] = norm_map[cand]
-            break
-
+    ]:
+        for v in variants:
+            if v in norm_map and key not in cmap:
+                cmap[key] = norm_map[v]
     for col in cols:
         n = _norm(col)
-        if "comemail" in n and "Com" not in cmap: cmap["Com"] = col
-        if "comceemail" in n and "Comce" not in cmap: cmap["Comce"] = col
-        if "diremail" in n and "Dir" not in cmap: cmap["Dir"] = col
-        if "techemail" in n and "Tech" not in cmap: cmap["Tech"] = col
+        if "comemail" in n: cmap["Com"] = col
+        elif "comceemail" in n: cmap["Comce"] = col
+        elif "diremail" in n: cmap["Dir"] = col
+        elif "techemail" in n: cmap["Tech"] = col
     return cmap
 
 def choose_contact_moa_from_row(row, colmap):
     ref_val = str(row.get(colmap.get("referent", ""), "")).lower()
-
     def pick(k):
         c = colmap.get(k)
         if not c:
             return None
         return _first_email(str(row.get(c, "")))
-
     for keyset, emailtype in [
         (["direction", "dir"], "Dir"),
         (["technique", "tech"], "Tech"),
@@ -205,12 +186,10 @@ def choose_contact_moa_from_row(row, colmap):
             e = pick(emailtype)
             if e:
                 return e
-
     for k in ["Tech", "Dir", "Comce", "Com"]:
         e = pick(k)
         if e:
             return e
-
     contacts_col = colmap.get("contacts")
     if contacts_col:
         e = _first_email(str(row.get(contacts_col, "")))
@@ -218,29 +197,19 @@ def choose_contact_moa_from_row(row, colmap):
             return e
     return ""
 
-# =========================================================
-# CSV / DF
-# =========================================================
-def read_csv_smart(file_like):
-    try:
-        return pd.read_csv(file_like, sep=None, engine="python")
-    except Exception:
-        file_like.seek(0)
-        return pd.read_csv(file_like, sep=";", engine="python")
-
 def build_base_df(csv_bytes):
     df = read_csv_smart(csv_bytes)
     cm = find_columns(df.columns)
     out = pd.DataFrame()
-    out["Raison sociale"] = df[cm["raison"]] if "raison" in cm else ""
-    out["Référent MOA"] = df[cm["referent"]] if "referent" in cm else ""
-    out["Catégorie-ID"] = df[cm["categorie_id"]] if "categorie_id" in cm else ""
-    out["Adresse"] = df[cm["adresse"]] if "adresse" in cm else ""
+    out["Raison sociale"] = df[cm.get("raison", "")] if "raison" in cm else ""
+    out["Référent MOA"] = df[cm.get("referent", "")] if "referent" in cm else ""
+    out["Catégorie-ID"] = df[cm.get("categorie_id", "")] if "categorie_id" in cm else ""
+    out["Adresse"] = df[cm.get("adresse", "")] if "adresse" in cm else ""
     out["Contact MOA"] = df.apply(lambda r: choose_contact_moa_from_row(r, cm), axis=1)
     return out
 
 # =========================================================
-# DISTANCE / EXPORT / CARTE
+# DISTANCES / EXPORT / CARTE
 # =========================================================
 def pick_closest_site(addr_field, base_coords):
     candidates = [a.strip() for a in str(addr_field).split(",") if a.strip()]
@@ -250,6 +219,8 @@ def pick_closest_site(addr_field, base_coords):
         if not g: continue
         lat, lon, country, cp, full = g
         cp = cp or extract_cp_fallback(c)
+        if lat is None or lon is None:
+            continue
         d = distance_km(base_coords, (lat, lon))
         if best is None or d < best[0]:
             best = (d, full or c, (lat, lon), country, cp)
@@ -289,8 +260,30 @@ def compute_distances_multisite(df, base_loc):
             "Contact MOA": r.get("Contact MOA", ""),
         }
         chosen.append(row)
-        if co: coords[name] = (co[0], co[1], country)
+        if co and co[0] and co[1]:
+            coords[name] = (co[0], co[1], country)
     return pd.DataFrame(chosen), base_coords, coords, used_fb
+
+def make_map(df, base_coords, coords_dict, base_label):
+    fmap = folium.Map(location=[46.6, 2.5], zoom_start=5, tiles="CartoDB positron", control_scale=True)
+    if base_coords and all(base_coords):
+        folium.Marker(base_coords, icon=folium.Icon(color="red", icon="star"),
+                      popup=f"Projet {base_label}", tooltip="Projet").add_to(fmap)
+    for _, r in df.iterrows():
+        name = r.get("Raison sociale", "")
+        c = coords_dict.get(name)
+        if not c:
+            continue
+        lat, lon, country = c
+        if lat is None or lon is None:
+            continue
+        addr = r.get("Adresse", "(adresse non précisée)")
+        cp = r.get("Code postal", "")
+        folium.Marker([lat, lon],
+                      icon=folium.Icon(color="blue", icon="industry"),
+                      popup=f"<b>{name}</b><br>{addr}<br>{cp} – {country}",
+                      tooltip=name).add_to(fmap)
+    return fmap
 
 def to_excel_complet(df, template=TEMPLATE_PATH, start=START_ROW):
     wb = load_workbook(template)
@@ -320,68 +313,11 @@ def to_simple_contact(df_like):
     df.to_excel(b, index=False)
     b.seek(0)
     return b
-    
-def make_map(df, base_coords, coords_dict, base_label):
-    """
-    Génère la carte Folium en ignorant les points non géocodés (lat/lon None).
-    """
-    fmap = folium.Map(location=[46.6, 2.5], zoom_start=5, tiles="CartoDB positron", control_scale=True)
-
-    # Marqueur du projet
-    if base_coords and all(base_coords):
-        folium.Marker(
-            base_coords,
-            icon=folium.Icon(color="red", icon="star"),
-            popup=f"Projet {base_label}",
-            tooltip="Projet",
-        ).add_to(fmap)
-
-    # Marqueurs des entreprises
-    for _, r in df.iterrows():
-        name = r.get("Raison sociale", "")
-        c = coords_dict.get(name)
-        if not c:
-            continue
-
-        lat, lon, country = c
-
-        # 🧱 skip si pas de coordonnées valides
-        if lat is None or lon is None:
-            continue
-
-        addr = r.get("Adresse", "(adresse non précisée)")
-        cp = r.get("Code postal", "")
-        folium.Marker(
-            [lat, lon],
-            icon=folium.Icon(color="blue", icon="industry"),
-            popup=f"<b>{name}</b><br>{addr}<br>{cp} – {country}",
-            tooltip=name,
-        ).add_to(fmap)
-
-        folium.map.Marker(
-            [lat, lon],
-            icon=DivIcon(
-                icon_size=(180, 36),
-                icon_anchor=(0, 0),
-                html=f'<div style="font-weight:600;color:#1f6feb;white-space:nowrap;text-shadow:0 0 3px #fff;">{name}</div>',
-            ),
-        ).add_to(fmap)
-
-    return fmap
-
-
-
-def map_to_html(fmap):
-    s = fmap.get_root().render().encode("utf-8")
-    b = BytesIO()
-    b.write(s)
-    b.seek(0)
-    return b
 
 # =========================================================
 # INTERFACE
 # =========================================================
-st.title("📍 MOA – v20 : contact simple (4 col.) & enrichi (adresse/CP/distance)")
+st.title("📍 MOA – v21 : robuste, adresses fiables & distances sécurisées")
 
 mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "🚗 Enrichi (distance & carte)"], horizontal=True)
 base_loc = st.text_input("📮 Code postal ou adresse du projet", placeholder="ex : 33210 ou '17 Boulevard Allende, 33210 Langon'")
@@ -411,19 +347,15 @@ if file and (mode == "🧾 Contact simple" or base_loc):
                 x1 = to_simple_contact(df_contact)
                 st.download_button("⬇️ Télécharger le contact simple", data=x1, file_name=f"{name_simple}.xlsx")
                 fmap = make_map(df_full, base_coords, coords_dict, base_loc)
-                htmlb = map_to_html(fmap)
+                htmlb = BytesIO(fmap.get_root().render().encode("utf-8"))
                 st.download_button("📥 Télécharger la carte (HTML)", data=htmlb, file_name=f"{name_map}.html", mime="text/html")
                 st_html(htmlb.getvalue().decode("utf-8"), height=520)
-
                 if used_fb or not ORS_KEY:
                     st.warning("⚠️ Certaines distances ont été calculées à vol d’oiseau (clé ORS absente/indisponible).")
                 else:
                     st.caption("🚗 Distances calculées avec OpenRouteService.")
     except Exception as e:
-        import traceback, sys
-        print("========== ERREUR DÉTAILLÉE ==========", file=sys.stderr)
-        traceback.print_exc()
-        print("======================================", file=sys.stderr)
+        import traceback
         st.error(f"💥 Erreur inattendue : {type(e).__name__} – {str(e)}")
         st.text_area("🔍 Détail complet :", traceback.format_exc(), height=400)
 
