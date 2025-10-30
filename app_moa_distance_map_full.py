@@ -371,7 +371,7 @@ if file and (mode == "🧾 Contact simple" or base_loc):
 
         st.success("✅ Traitement terminé")
 
-        x1 = to_simple(df if mode == "🧾 Contact simple" else base_df)
+        x1 = to_simple(df)
         st.download_button("⬇️ Télécharger le contact simple", data=x1, file_name=f"{name_simple}.xlsx")
 
         if mode == "🚗 Avec distance & carte":
