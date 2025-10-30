@@ -9,12 +9,14 @@ from openpyxl import load_workbook
 import folium
 from folium.features import DivIcon
 from streamlit.components.v1 import html as st_html
-
+st.write("🔑 ORS_KEY détectée :", bool(ORS_KEY))
 # =========================================================
 # CONFIG
 # =========================================================
 TEMPLATE_PATH = "Sourcing base.xlsx"   # modèle Excel pour le fichier enrichi
 START_ROW = 11
+
+
 
 try:
     ORS_KEY = st.secrets["api"]["ORS_KEY"]
