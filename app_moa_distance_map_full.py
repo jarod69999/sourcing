@@ -59,19 +59,37 @@ def _first_email(text: str) -> str | None:
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
     """
-    Géocode via Nominatim (robuste et simple, comme v9bis).
+    Géocode via Nominatim (tolérant aux inversions CP/Ville).
     Retourne (lat, lon, country) ou None.
     """
-    geolocator = Nominatim(user_agent="moa_geo_v22")
-    try:
-        time.sleep(1)  # rester sous les limites Nominatim
-        loc = geolocator.geocode(query, timeout=12, addressdetails=True)
-        if loc:
-            addr = loc.raw.get("address", {})
-            country = addr.get("country", "France")
-            return (loc.latitude, loc.longitude, country)
-    except Exception:
+    if not isinstance(query, str) or not query.strip():
         return None
+
+    geolocator = Nominatim(user_agent="moa_geo_v22_tolerant")
+    tries = []
+
+    q = query.strip()
+    if "france" not in q.lower():
+        q = q + ", France"
+    tries.append(q)
+
+    # inversions possibles CP/Ville
+    m = re.search(r"\b(\d{4,6})\b\s*([A-Za-zÀ-ÿ' -]+)", q)
+    if m:
+        cp, ville = m.group(1).strip(), m.group(2).strip()
+        tries += [f"{ville} {cp}, France", f"{ville}, {cp}, France", f"{cp}, France"]
+
+    for t in tries:
+        try:
+            time.sleep(1)
+            loc = geolocator.geocode(t, timeout=12, addressdetails=True)
+            if loc:
+                addr = loc.raw.get("address", {})
+                country = addr.get("country", "France")
+                return (loc.latitude, loc.longitude, country)
+        except Exception:
+            continue
+
     return None
 
 # =========================================================
