@@ -1,4 +1,4 @@
-# app_moa_distance_map_full_v18.py
+# app_moa_distance_map_full_v19.py
 import streamlit as st
 import pandas as pd
 import re, os, time, unicodedata, requests
@@ -66,13 +66,13 @@ def extract_cp_fallback(text: str):
     return m.group(0) if m else ""
 
 # =========================================================
-# GÉOCODAGE (v18 corrigé)
+# GÉOCODAGE (v19 final)
 # =========================================================
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
     """
     Géocodage robuste + fallback interne pour codes postaux connus.
-    Retourne (lat, lon, country, postcode, full_address)
+    Retourne (lat, lon, country, postcode, full_address propre)
     """
     if not isinstance(query, str) or not query.strip():
         return None
@@ -81,11 +81,12 @@ def geocode(query: str):
     cp_match = CP_FR_RE.search(query)
     postcode_guess = cp_match.group(0) if cp_match else None
 
+    # Si code postal connu → coordonnées fixes
     if postcode_guess in POSTAL_TO_COORDS:
         lat, lon, country = POSTAL_TO_COORDS[postcode_guess]
         return (lat, lon, country, postcode_guess, query)
 
-    geolocator = Nominatim(user_agent="moa_geo_v18")
+    geolocator = Nominatim(user_agent="moa_geo_v19")
     q = re.sub(r",+", ",", query)
     q = re.sub(r"\s+", " ", q)
     is_fr = bool(cp_match)
@@ -109,17 +110,27 @@ def geocode(query: str):
             if loc:
                 addr = loc.raw.get("address", {})
                 cp = addr.get("postcode") or postcode_guess or extract_cp_fallback(query)
-                full = ", ".join([addr.get(k, "") for k in ["road", "city", "postcode"] if addr.get(k)]).strip(", ")
-                return (loc.latitude, loc.longitude, addr.get("country", "France"), cp, full or query)
+                # Construction de l’adresse lisible
+                parts = [
+                    addr.get("road", ""),
+                    addr.get("city", "") or addr.get("town", "") or addr.get("village", ""),
+                    cp or "",
+                    addr.get("country", "France")
+                ]
+                full = ", ".join([p for p in parts if p])
+                if not full or full.strip() in {", France", "France", ","}:
+                    full = query
+                return (loc.latitude, loc.longitude, addr.get("country", "France"), cp, full)
         except Exception:
             continue
 
+    # Fallback CP connu
     if postcode_guess in POSTAL_TO_COORDS:
         lat, lon, country = POSTAL_TO_COORDS[postcode_guess]
         return (lat, lon, country, postcode_guess, query)
 
-    return None
-
+    # Échec complet
+    return (None, None, "France", extract_cp_fallback(query), query)
 
 def ors_distance(a, b):
     """Distance routière (km) via OpenRouteService; None si indispo."""
@@ -142,7 +153,7 @@ def distance_km(a, b):
     return round(d)
 
 # =========================================================
-# COLONNES & EMAIL
+# COLONNES / EMAIL
 # =========================================================
 def find_columns(cols):
     cmap = {}
@@ -173,29 +184,20 @@ def find_columns(cols):
 
 def choose_contact_moa_from_row(row, colmap):
     ref_val = str(row.get(colmap.get("referent", ""), "")).lower()
-
     def pick(k):
         c = colmap.get(k)
         if not c: return None
         return _first_email(str(row.get(c, "")))
-
-    if any(k in ref_val for k in ["direction", "dir"]):
-        e = pick("Dir")
-        if e: return e
-    if any(k in ref_val for k in ["technique", "tech"]):
-        e = pick("Tech")
-        if e: return e
-    if any(k in ref_val for k in ["commercial", "commerce", "comce"]):
-        e = pick("Comce")
-        if e: return e
-    if any(k in ref_val for k in ["communication", "comm"]):
-        e = pick("Com")
-        if e: return e
-
+    for keyset, emailtype in [
+        (["direction", "dir"], "Dir"),
+        (["technique", "tech"], "Tech"),
+        (["commercial", "commerce", "comce"], "Comce"),
+        (["communication", "comm"], "Com"),
+    ]:
+        if any(k in ref_val for k in keyset):
+            e = pick(emailtype);  if e: return e
     for k in ["Tech", "Dir", "Comce", "Com"]:
-        e = pick(k)
-        if e: return e
-
+        e = pick(k);  if e: return e
     contacts_col = colmap.get("contacts")
     if contacts_col:
         e = _first_email(str(row.get(contacts_col, "")))
@@ -224,26 +226,20 @@ def build_base_df(csv_bytes):
     return out
 
 # =========================================================
-# SITES & DISTANCES
+# SITES / DISTANCES
 # =========================================================
 def pick_closest_site(addr_field, base_coords):
-    """
-    Sélectionne l'adresse la plus proche du projet parmi les implantations,
-    et assure un retour propre avec adresse + CP même si géocodage partiel.
-    """
     candidates = [a.strip() for a in str(addr_field).split(",") if a.strip()]
     best = None
     for c in candidates if candidates else [addr_field]:
         g = geocode(c) or geocode(c + ", France")
-        if not g:
-            continue
+        if not g: continue
         lat, lon, country, cp, full = g
         cp = cp or extract_cp_fallback(c)
         d = distance_km(base_coords, (lat, lon))
         if best is None or d < best[0]:
             best = (d, full or c, (lat, lon), country, cp)
-    if best:
-        return best[1], best[2], best[3], best[4]
+    if best: return best[1], best[2], best[3], best[4]
     return addr_field, None, "France", extract_cp_fallback(addr_field)
 
 def compute_distances_multisite(df, base_loc):
@@ -279,12 +275,11 @@ def compute_distances_multisite(df, base_loc):
             "Contact MOA": r.get("Contact MOA", ""),
         }
         chosen.append(row)
-        if co:
-            coords[name] = (co[0], co[1], country)
+        if co: coords[name] = (co[0], co[1], country)
     return pd.DataFrame(chosen), base_coords, coords, used_fb
 
 # =========================================================
-# EXPORTS
+# EXPORTS / CARTE
 # =========================================================
 def to_excel_complet(df, template=TEMPLATE_PATH, start=START_ROW):
     wb = load_workbook(template)
@@ -315,13 +310,11 @@ def to_simple_contact(df_like):
     b.seek(0)
     return b
 
-# =========================================================
-# CARTE
-# =========================================================
 def make_map(df, base_coords, coords_dict, base_label):
     fmap = folium.Map(location=[46.6, 2.5], zoom_start=5, tiles="CartoDB positron", control_scale=True)
     if base_coords:
-        folium.Marker(base_coords, icon=folium.Icon(color="red", icon="star"), popup=f"Projet {base_label}", tooltip="Projet").add_to(fmap)
+        folium.Marker(base_coords, icon=folium.Icon(color="red", icon="star"),
+                      popup=f"Projet {base_label}", tooltip="Projet").add_to(fmap)
     for _, r in df.iterrows():
         name = r.get("Raison sociale", "")
         c = coords_dict.get(name)
@@ -349,7 +342,7 @@ def map_to_html(fmap):
 # =========================================================
 # INTERFACE
 # =========================================================
-st.title("📍 MOA – v18 : contact simple (4 col.) & enrichi (adresse/CP/distance)")
+st.title("📍 MOA – v19 : contact simple (4 col.) & enrichi (adresse/CP/distance)")
 
 mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "🚗 Enrichi (distance & carte)"], horizontal=True)
 base_loc = st.text_input("📮 Code postal ou adresse du projet", placeholder="ex : 33210 ou '17 Boulevard Allende, 33210 Langon'")
@@ -386,6 +379,10 @@ if file and (mode == "🧾 Contact simple" or base_loc):
                     st.warning("⚠️ Certaines distances ont été calculées à vol d’oiseau (clé ORS absente/indisponible).")
                 else:
                     st.caption("🚗 Distances calculées avec OpenRouteService.")
+    except Exception as e:
+        import traceback
+        st.error(f"💥 Erreur inattendue : {type(e).__name__}")
+        st.text_area("Détail complet OpenRouteService.")
     except Exception as e:
         import traceback
         st.error(f"💥 Erreur inattendue : {type(e).__name__}")
