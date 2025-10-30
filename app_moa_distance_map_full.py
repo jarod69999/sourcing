@@ -18,16 +18,13 @@ ORS_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjVlMDYzYWQzMDEzZ
 TEMPLATE_PATH = "Sourcing base.xlsx"   # modèle Excel pour le fichier enrichi
 START_ROW = 11
 
-
-
-try:
-    ORS_KEY = st.secrets["api"]["ORS_KEY"]
-except Exception:
-    ORS_KEY = os.getenv("ORS_KEY", "")
-# ✅ test de lecture
-st.write("🔑 ORS_KEY détectée :", bool(ORS_KEY))
-
-
+# === ICI LA CLÉ ORS ===
+ORS_KEY = "5b3ce3597851110001cf6248123456789abcdef"
+if not ORS_KEY or ORS_KEY.strip() == "":
+    st.warning("⚠️ Clé ORS absente : géocodage désactivé.")
+else:
+    st.success("✅ Clé ORS bien chargée.")
+    
 PRIMARY = "#0b1d4f"
 BG = "#f5f0eb"
 st.markdown(f"""
