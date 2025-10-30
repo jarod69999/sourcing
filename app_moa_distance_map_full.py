@@ -403,7 +403,18 @@ if file and (mode == "🧾 Contact simple" or base_loc):
         st.text_area("Détail complet OpenRouteService.")
     except Exception as e:
         import traceback
-        st.error(f"💥 Erreur inattendue : {type(e).__name__} – {str(e)}")
-        st.text_area("🔍 Détail complet :", traceback.format_exc(), height=300)
+        import sys
+        # Impression directe dans le terminal Streamlit
+        print("========== ERREUR DÉTAILLÉE ==========", file=sys.stderr)
+        traceback.print_exc()
+        print("======================================", file=sys.stderr)
+
+        # Affichage clair dans l’app
+        st.error(f"💥 Erreur inattendue : {type(e).__name__}")
+        st.text_area(
+            "🔍 Détail complet de l’erreur :",
+            traceback.format_exc(),
+            height=400
+        )
 
 
