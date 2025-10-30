@@ -1,3 +1,4 @@
+# app_moa_distance_map_full.py
 import streamlit as st
 import pandas as pd
 import re, os, time, unicodedata, requests
@@ -12,7 +13,7 @@ from streamlit.components.v1 import html as st_html
 # =========================================================
 # CONFIG
 # =========================================================
-TEMPLATE_PATH = "Sourcing base.xlsx"
+TEMPLATE_PATH = "Sourcing base.xlsx"   # garde ton modèle Excel existant
 START_ROW = 11
 
 try:
@@ -72,6 +73,7 @@ def extract_cp_fallback(text: str):
 def geocode(query: str):
     """
     Géocodage robuste + fallback interne pour codes postaux connus
+    Retour: (lat, lon, country, postcode) ou None
     """
     if not isinstance(query, str) or not query.strip():
         return None
@@ -84,7 +86,7 @@ def geocode(query: str):
             lat, lon, country = POSTAL_TO_COORDS[cp]
             return (lat, lon, country, cp)
 
-    geolocator = Nominatim(user_agent="moa_geo_v15")
+    geolocator = Nominatim(user_agent="moa_geo_v16")
     q = re.sub(r",+", ",", query)
     q = re.sub(r"\s+", " ", q)
     is_fr = bool(cp_match)
@@ -116,7 +118,6 @@ def geocode(query: str):
         except Exception:
             continue
 
-    # si rien trouvé, mais code postal FR connu → fallback coordonnées approximatives
     if cp_match and cp_match.group(0) in POSTAL_TO_COORDS:
         lat, lon, country = POSTAL_TO_COORDS[cp_match.group(0)]
         return (lat, lon, country, cp_match.group(0))
@@ -124,12 +125,13 @@ def geocode(query: str):
     return None
 
 def ors_distance(a, b):
+    """Distance routière (km) via OpenRouteService; None si indispo."""
     if not ORS_KEY: return None
     url = "https://api.openrouteservice.org/v2/directions/driving-car"
     headers = {"Authorization": ORS_KEY, "Content-Type": "application/json"}
     data = {"coordinates": [[a[1], a[0]], [b[1], b[0]]]}
     try:
-        r = requests.post(url, json=data, headers=headers, timeout=20)
+        r = requests.post(url, json=data, headers=headers, timeout=25)
         if r.status_code == 200:
             return r.json()["routes"][0]["summary"]["distance"] / 1000.0
     except Exception:
@@ -160,7 +162,7 @@ def find_columns(cols):
             if v in norm_map and label not in cmap:
                 cmap[label] = norm_map[v]
 
-    # emails type "Com-Email" etc.
+    # emails type "Com-Email" etc. (orthographes souples)
     for col in cols:
         n = _norm(col)
         if "comemail" in n and "Com" not in cmap: cmap["Com"] = col
@@ -178,45 +180,40 @@ def choose_contact_moa_from_row(row, colmap):
             return None
         return _first_email(str(row.get(c, "")))
 
-    # selon le poste du référent
     if any(k in ref_val for k in ["direction", "dir"]):
         e = pick("Dir")
-        if e:
-            return e
+        if e: return e
     if any(k in ref_val for k in ["technique", "tech"]):
         e = pick("Tech")
-        if e:
-            return e
+        if e: return e
     if any(k in ref_val for k in ["commercial", "commerce", "comce"]):
         e = pick("Comce")
-        if e:
-            return e
+        if e: return e
     if any(k in ref_val for k in ["communication", "comm"]):
         e = pick("Com")
-        if e:
-            return e
+        if e: return e
 
     for k in ["Tech", "Dir", "Comce", "Com"]:
         e = pick(k)
-        if e:
-            return e
+        if e: return e
 
     contacts_col = colmap.get("contacts")
     if contacts_col:
         e = _first_email(str(row.get(contacts_col, "")))
-        if e:
-            return e
+        if e: return e
 
     return ""
 
 # =========================================================
-# CSV / DISTANCES
+# CSV / ENRICHISSEMENT
 # =========================================================
 def process_csv_to_df(csv_bytes):
+    # lit CSV robustement (auto ; ou ,)
     try:
         df = pd.read_csv(csv_bytes, sep=None, engine="python")
     except Exception:
         df = pd.read_csv(csv_bytes, sep=";", engine="python")
+
     cm = find_columns(df.columns)
     out = pd.DataFrame()
     out["Raison sociale"] = df[cm["raison"]] if "raison" in cm else ""
@@ -225,6 +222,23 @@ def process_csv_to_df(csv_bytes):
     out["Adresse"] = df[cm["adresse"]] if "adresse" in cm else ""
     out["Contact MOA"] = df.apply(lambda r: choose_contact_moa_from_row(r, cm), axis=1)
     return out
+
+def enrich_geo_without_distance(df):
+    """Enrichit Pays + Code postal par géocodage, sans distance (mode contact simple)."""
+    rows = []
+    for _, r in df.iterrows():
+        addr = r.get("Adresse", "")
+        g = geocode(addr) or geocode(str(addr) + ", France")
+        if g:
+            country, cp = g[2], g[3]
+        else:
+            country, cp = "", extract_cp_fallback(addr)
+        rows.append({
+            **r.to_dict(),
+            "Pays": country,
+            "Code postal": cp
+        })
+    return pd.DataFrame(rows)
 
 def pick_closest_site(addr_field, base_coords):
     candidates = [a.strip() for a in str(addr_field).split(",") if a.strip()]
@@ -243,15 +257,14 @@ def pick_closest_site(addr_field, base_coords):
     return addr_field, None, "", extract_cp_fallback(addr_field)
 
 def compute_distances_multisite(df, base_loc):
-    raw = base_loc.strip()
+    raw = (base_loc or "").strip()
     base = geocode(raw)
     if not base:
         st.warning(f"⚠️ Lieu de référence '{base_loc}' non géocodable.")
-        df2 = df.copy()
-        df2["Pays"] = ""
-        df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
+        df2 = enrich_geo_without_distance(df)
         df2["Distance au projet"] = ""
         return df2, None, {}, False
+
     base_coords = (base[0], base[1])
     chosen, coords, used_fb = [], {}, False
     for _, r in df.iterrows():
@@ -263,8 +276,8 @@ def compute_distances_multisite(df, base_loc):
             dist = round(d) if d else round(geodesic(base_coords, co).km)
             used_fb |= (d is None)
         else:
-            dist = None
-        chosen.append({
+            dist = ""
+        row = {
             "Raison sociale": name,
             "Pays": country,
             "Adresse": kept,
@@ -273,7 +286,8 @@ def compute_distances_multisite(df, base_loc):
             "Catégories": r.get("Catégories", ""),
             "Référent MOA": r.get("Référent MOA", ""),
             "Contact MOA": r.get("Contact MOA", ""),
-        })
+        }
+        chosen.append(row)
         if co:
             coords[name] = (co[0], co[1], country)
     return pd.DataFrame(chosen), base_coords, coords, used_fb
@@ -282,6 +296,7 @@ def compute_distances_multisite(df, base_loc):
 # EXPORTS / CARTE
 # =========================================================
 def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
+    """Alimente ton modèle Excel (Sourcing base.xlsx)."""
     wb = load_workbook(template)
     ws = wb.worksheets[0]
     for i, (_, r) in enumerate(df.iterrows(), start=start):
@@ -299,9 +314,19 @@ def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
     return b
 
 def to_simple(df):
+    """
+    Contact simple à partir du DF ENRICHI (pas le brut !)
+    On inclut Adresse + Code postal pour toi.
+    """
     b = BytesIO()
-    df_simple = df[["Raison sociale", "Référent MOA", "Contact MOA", "Catégories"]].copy()
-    df_simple.columns = ["Raison sociale", "Référent MOA (nom)", "Contact MOA (email)", "Catégories"]
+    cols = ["Raison sociale", "Référent MOA", "Contact MOA", "Catégories", "Adresse", "Code postal"]
+    keep = [c for c in cols if c in df.columns]
+    df_simple = df[keep].copy()
+    # renommer pour libellés clean
+    df_simple.rename(columns={
+        "Référent MOA": "Référent MOA (nom)",
+        "Contact MOA": "Contact MOA (email)"
+    }, inplace=True)
     df_simple.to_excel(b, index=False)
     b.seek(0)
     return b
@@ -318,7 +343,7 @@ def make_map(df, base_coords, coords_dict, base_cp):
     for _, r in df.iterrows():
         name = r.get("Raison sociale", "")
         c = coords_dict.get(name)
-        if not c:
+        if not c: 
             continue
         lat, lon, country = c
         addr = r.get("Adresse", "")
@@ -346,7 +371,7 @@ def map_to_html(fmap):
 # =========================================================
 # INTERFACE
 # =========================================================
-st.title("📍 MOA – v15 : coordonnées fiables, fallback et emails MOA auto")
+st.title("📍 MOA – v16 : adresses + CP + distances routières (ORS)")
 
 mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "🚗 Avec distance & carte"], horizontal=True)
 base_loc = st.text_input("📮 Code postal ou adresse du projet", placeholder="ex : 33210 ou '17 Boulevard Allende, 33210 Langon'")
@@ -363,14 +388,17 @@ if file and (mode == "🧾 Contact simple" or base_loc):
     try:
         with st.spinner("⏳ Traitement en cours..."):
             base_df = process_csv_to_df(file)
-            coords_dict, base_coords, used_fb = {}, None, False
+
             if mode == "🚗 Avec distance & carte":
                 df, base_coords, coords_dict, used_fb = compute_distances_multisite(base_df, base_loc)
             else:
-                df = base_df.copy()
+                # enrichissement sans distance pour garder Pays + CP
+                df = enrich_geo_without_distance(base_df)
+                base_coords, coords_dict, used_fb = None, {}, False
 
         st.success("✅ Traitement terminé")
 
+        # ⚠️ IMPORTANT : toujours exporter le simple depuis DF ENRICHI
         x1 = to_simple(df)
         st.download_button("⬇️ Télécharger le contact simple", data=x1, file_name=f"{name_simple}.xlsx")
 
@@ -382,7 +410,7 @@ if file and (mode == "🧾 Contact simple" or base_loc):
             st.download_button("📥 Télécharger la carte (HTML)", data=htmlb, file_name=f"{name_map}.html", mime="text/html")
             st_html(htmlb.getvalue().decode("utf-8"), height=520)
             if used_fb or not ORS_KEY:
-                st.warning("⚠️ Certaines distances ont été calculées à vol d’oiseau.")
+                st.warning("⚠️ Certaines distances ont été calculées à vol d’oiseau (clé ORS absente ou indisponible).")
             else:
                 st.caption("🚗 Distances calculées avec OpenRouteService.")
 
@@ -393,5 +421,4 @@ if file and (mode == "🧾 Contact simple" or base_loc):
         import traceback
         st.error(f"💥 Erreur inattendue : {type(e).__name__}")
         st.text_area("Détail complet :", traceback.format_exc(), height=300)
-
 
