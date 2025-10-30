@@ -9,7 +9,7 @@ from openpyxl import load_workbook
 import folium
 from folium.features import DivIcon
 from streamlit.components.v1 import html as st_html
-st.write("🔑 ORS_KEY détectée :", bool(ORS_KEY))
+
 # =========================================================
 # CONFIG
 # =========================================================
@@ -22,6 +22,9 @@ try:
     ORS_KEY = st.secrets["api"]["ORS_KEY"]
 except Exception:
     ORS_KEY = os.getenv("ORS_KEY", "")
+# ✅ test de lecture
+st.write("🔑 ORS_KEY détectée :", bool(ORS_KEY))
+
 
 PRIMARY = "#0b1d4f"
 BG = "#f5f0eb"
