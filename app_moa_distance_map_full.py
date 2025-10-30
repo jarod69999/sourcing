@@ -189,15 +189,15 @@ def choose_contact_moa_from_row(row, colmap):
         if not c: return None
         return _first_email(str(row.get(c, "")))
     for keyset, emailtype in [
-        (["direction", "dir"], "Dir"),
-        (["technique", "tech"], "Tech"),
-        (["commercial", "commerce", "comce"], "Comce"),
-        (["communication", "comm"], "Com"),
-    ]:
-        if any(k in ref_val for k in keyset):
-            e = pick(emailtype);  if e: return e
-    for k in ["Tech", "Dir", "Comce", "Com"]:
-        e = pick(k);  if e: return e
+    (["direction", "dir"], "Dir"),
+    (["technique", "tech"], "Tech"),
+    (["commercial", "commerce", "comce"], "Comce"),
+    (["communication", "comm"], "Com"),
+]:
+    if any(k in ref_val for k in keyset):
+        e = pick(emailtype)
+        if e:
+            return e
     contacts_col = colmap.get("contacts")
     if contacts_col:
         e = _first_email(str(row.get(contacts_col, "")))
