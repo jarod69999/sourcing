@@ -406,3 +406,4 @@ if file and (mode == "🧾 Contact simple" or base_loc):
         st.error(f"💥 Erreur inattendue : {type(e).__name__} – {str(e)}")
         st.text_area("🔍 Détail complet :", traceback.format_exc(), height=300)
 
+
