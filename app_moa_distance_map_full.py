@@ -1,7 +1,7 @@
-# app_moa_distance_map_full_v24.py
+# app_moa_distance_map_full_v26.py
 import streamlit as st
 import pandas as pd
-import re, os, time, unicodedata, requests
+import re, time, unicodedata
 from io import BytesIO
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
@@ -49,26 +49,46 @@ def _first_email(text: str) -> str | None:
     return m.group(0) if m else None
 
 # =========================================================
-# GÉOCODAGE (Nominatim simple)
+# GÉOCODAGE (propre et robuste)
 # =========================================================
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
+    """
+    Géocodage Nominatim propre :
+    - détecte CP même si au début ou absent
+    - construit une adresse courte sans CP/France doublé
+    - renvoie (lat, lon, country, cp, adresse_propre)
+    """
     if not isinstance(query, str) or not query.strip():
         return None
-    geolocator = Nominatim(user_agent="moa_geo_v24")
-    tries = [query.strip()]
+
+    geolocator = Nominatim(user_agent="moa_geo_v26")
+    query = query.strip()
+    tries = [query]
     if "france" not in query.lower():
-        tries.append(query.strip() + ", France")
-    try:
-        for t in tries:
+        tries.append(query + ", France")
+
+    for t in tries:
+        try:
             time.sleep(1)
             loc = geolocator.geocode(t, timeout=12, addressdetails=True)
             if loc:
                 addr = loc.raw.get("address", {})
                 country = addr.get("country", "France")
-                return (loc.latitude, loc.longitude, country)
-    except Exception:
-        return None
+                cp = addr.get("postcode")
+                if not cp:
+                    cp = extract_postcode(query) or ""
+                city = addr.get("city") or addr.get("town") or addr.get("village") or ""
+                road = addr.get("road") or ""
+                house = addr.get("house_number") or ""
+                suburb = addr.get("suburb") or ""
+                parts = [p for p in [house, road, suburb, city] if p]
+                adresse_propre = ", ".join(parts)
+                if cp and cp not in adresse_propre:
+                    adresse_propre = f"{adresse_propre}, {cp}" if adresse_propre else cp
+                return (loc.latitude, loc.longitude, country, cp, adresse_propre)
+        except Exception:
+            continue
     return None
 
 # =========================================================
@@ -84,12 +104,10 @@ def distance_km(a, b):
 def find_columns(cols):
     cmap = {}
     norm_map = {_norm(c): c for c in cols}
-
     def pick(keys, label):
         for k in keys:
             if k in norm_map and label not in cmap:
                 cmap[label] = norm_map[k]
-
     pick(["raisonsociale", "raison", "rs"], "raison")
     pick(["referentmoa", "referent", "refmoa"], "referent")
     pick(["adresse", "address", "adressepostale"], "adresse")
@@ -108,12 +126,10 @@ def find_columns(cols):
 def derive_contact(row, colmap):
     email = None
     ref_name = str(row.get(colmap.get("referent", ""), "")).strip()
-
     if "email_referent" in colmap:
         v = row.get(colmap["email_referent"], "")
         if isinstance(v, str) and "@" in v:
             email = v.strip()
-
     if not email and "contacts" in colmap:
         raw = str(row.get(colmap["contacts"], ""))
         parts = re.split(r"[,\s;]+", raw)
@@ -161,27 +177,29 @@ def pick_closest_site(addr_field: str, base_coords: tuple[float, float] | None):
         candidates = [addr_field.strip()]
     best = None
     for c in candidates:
-        cp = extract_postcode(c)
-        q = (cp + ", France") if cp else (c + ", France")
-        g = geocode(q)
+        g = geocode(c)
         if not g:
             continue
-        lat, lon, country = g
+        lat, lon, country, cp, addr_clean = g
+        # on recalcule la distance sur le CP pour homogénéiser
+        if cp:
+            g_cp = geocode(cp + ", France")
+            if g_cp:
+                lat, lon, country, _, _ = g_cp
         if base_coords and lat and lon:
             d = distance_km(base_coords, (lat, lon))
         else:
             d = float("inf")
         if best is None or d < best[0]:
-            best = (d, c, (lat, lon), country, (cp or extract_postcode(c) or ""))
+            best = (d, addr_clean, (lat, lon), country, cp)
     if best:
-        _, kept, coords, country, cp = best
-        return kept, coords, country, cp
-    return candidates[0], None, "France", (extract_postcode(candidates[0]) or "")
+        _, addr_clean, coords, country, cp = best
+        return addr_clean, coords, country, cp
+    return "(adresse non précisée)", None, "France", ""
 
 def compute_distances_enriched(base_df: pd.DataFrame, base_loc: str):
     base_q = (base_loc or "").strip()
     base_data = geocode(base_q + ("" if "France" in base_q else ", France")) if base_q else None
-
     if not base_data:
         st.warning(f"⚠️ Lieu de référence '{base_loc}' non géocodable.")
         df2 = base_df.copy()
@@ -189,10 +207,8 @@ def compute_distances_enriched(base_df: pd.DataFrame, base_loc: str):
         df2["Code postal"] = df2["Adresse"].apply(lambda a: extract_postcode(str(a) or "") or "")
         df2["Distance au projet"] = ""
         return df2, None, {}, False
-
     base_coords = (base_data[0], base_data[1])
     rows, coords_dict = [], {}
-
     for _, r in base_df.iterrows():
         name = r.get("Raison sociale", "")
         addr = r.get("Adresse", "") or "(adresse non précisée)"
@@ -274,7 +290,7 @@ def make_map(df, base_coords, coords_dict, base_label):
 # =========================================================
 # UI
 # =========================================================
-st.title("📍 MOA – v24 : distances à vol d’oiseau uniquement")
+st.title("📍 MOA – v26 : adresses propres, CP distinct et distance par CP")
 
 mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "✈️ Enrichi (vol d’oiseau + carte)"], horizontal=True)
 base_loc = st.text_input("📮 Code postal ou adresse du projet", placeholder="ex : 33210 ou '17 Boulevard Allende, 33210 Langon'")
