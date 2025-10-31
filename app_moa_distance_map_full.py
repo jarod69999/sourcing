@@ -15,7 +15,7 @@ START_ROW = 11
 
 PRIMARY = "#0b1d4f"
 BG      = "#f5f0eb"
-st.set_page_config(page_title="MOA – v13 sans API", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA – v13.1 stable", page_icon="📍", layout="wide")
 st.markdown(f"""
 <style>
  .stApp {{background:{BG};font-family:Inter,system-ui,Roboto,Arial;}}
@@ -27,7 +27,9 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ====================== GEO & HELPERS =======================
-COUNTRY_WORDS = {"france","belgique","belgium","espagne","españa","portugal","italie","italia","deutschland","germany","suisse","switzerland","luxembourg"}
+COUNTRY_WORDS = {"france","belgique","belgium","espagne","españa","portugal",
+                 "italie","italia","deutschland","germany","suisse",
+                 "switzerland","luxembourg"}
 CP_FALLBACK_RE = re.compile(r"\b\d{4,6}\b")
 
 def clean_token(t:str)->str:
@@ -35,14 +37,18 @@ def clean_token(t:str)->str:
 
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    """Renvoie (lat, lon, pays, code_postal)"""
-    geolocator = Nominatim(user_agent="moa_geo_v13")
+    """Renvoie (lat, lon, pays, code_postal) avec nettoyage CP"""
+    if not query or not isinstance(query, str):
+        return None
+    # Nettoyage automatique des CP du type "40 300" → "40300"
+    query = re.sub(r"(\d{2})\s?(\d{3})", r"\1\2", query)
+    geolocator = Nominatim(user_agent="moa_geo_v13_1")
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
         if loc:
             addr = loc.raw.get("address", {})
-            country = addr.get("country", "France")
+            country = addr.get("country", "")
             postcode = addr.get("postcode", "")
             return (loc.latitude, loc.longitude, country, postcode)
     except Exception:
@@ -139,26 +145,36 @@ def process_csv_to_df(csv_bytes):
 
 # ================= DISTANCES & MULTI-SITES =================
 def pick_closest_site(addr_field: str, base_coords: tuple[float,float]):
+    """Choisit la meilleure implantation et conserve le pays détecté."""
     candidates = [a.strip() for a in addr_field.split(",") if a.strip()] or [addr_field]
     best = None
     for cand in candidates:
-        g = geocode(cand) or geocode(cand + ", France")
+        # Détection pays dans l’adresse
+        has_country = any(p in cand.lower() for p in COUNTRY_WORDS)
+        # On géocode sans forcer France si un pays est mentionné
+        g = geocode(cand) or (geocode(cand + ", France") if not has_country else None)
         if not g: continue
         lat, lon, country, postcode = g
-        if country != "France" and postcode and re.match(r"^\d{5}$", str(postcode)):
-            country = "France"
         d = distance_km(base_coords, (lat, lon))
         if best is None or d < best[0]:
             best = (d, cand, (lat,lon), country, postcode)
     if best:
-        return best[1], best[2], best[3], (best[4] or extract_cp_fallback(best[1]))
+        country = best[3] or "France"
+        return best[1], best[2], country, (best[4] or extract_cp_fallback(best[1]))
     return addr_field, None, "", extract_cp_fallback(addr_field)
 
-def compute_distances(df, base_address, base_cp):
-    base_query = f"{base_address}, {base_cp}, France".strip()
-    base = geocode(base_query) or geocode(base_address) or geocode(base_cp)
+def compute_distances(df, base_address):
+    """base_address peut être CP, ville ou adresse complète"""
+    if not base_address.strip():
+        st.warning("⚠️ Aucune adresse de référence fournie.")
+        return df, None, {}
+    # Nettoyage et ajout France si pas de pays
+    base_query = re.sub(r"(\d{2})\s?(\d{3})", r"\\1\\2", base_address.strip())
+    if not any(p in base_query.lower() for p in COUNTRY_WORDS):
+        base_query = base_query + ", France"
+    base = geocode(base_query)
     if not base:
-        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}' / '{base_cp}'.")
+        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'.")
         df2 = df.copy()
         df2["Pays"] = ""
         df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
@@ -190,7 +206,7 @@ def compute_distances(df, base_address, base_cp):
 def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
     wb = load_workbook(template)
     ws = wb.worksheets[0]
-    max_cols = 9
+    max_cols = 8
     for r in range(start, ws.max_row+1):
         for c in range(1, max_cols+1):
             ws.cell(r, c, value=None)
@@ -211,11 +227,11 @@ def to_simple(df):
     bio.seek(0); return bio
 
 # ===================== CARTE (Folium) =======================
-def make_map(df, base_coords, coords_dict, base_address, base_cp):
+def make_map(df, base_coords, coords_dict, base_address):
     fmap = folium.Map(location=[46.6, 2.5], zoom_start=5, tiles="CartoDB positron", control_scale=True)
     if base_coords:
         folium.Marker(base_coords, icon=folium.Icon(color="red", icon="star"),
-                      popup=f"<b>Projet</b><br>{base_address}<br>{base_cp}",
+                      popup=f"<b>Projet</b><br>{base_address}",
                       tooltip="Projet").add_to(fmap)
     for _, r in df.iterrows():
         name = r.get("Raison sociale","")
@@ -241,15 +257,11 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
-st.title("📍 MOA – v13 : mode simple / enrichi, sans API")
+st.title("📍 MOA – v13.1 stable : une ligne d’adresse, sans API")
 
 mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
-
-left, right = st.columns([1,1])
-with left:
-    base_address = st.text_input("🏠 Adresse du projet (sans CP)", placeholder="Ex : 17 Boulevard Allende, Langon")
-with right:
-    base_cp      = st.text_input("📮 Code postal / Ville", placeholder="Ex : 33210")
+base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)", 
+                             placeholder="Ex : 17 Boulevard Allende 33210 Langon OU 33210 Langon")
 
 file = st.file_uploader("📄 Fichier CSV", type=["csv"])
 
@@ -257,12 +269,12 @@ name_full   = st.text_input("Nom du fichier Excel complet (sans extension)", "So
 name_simple = st.text_input("Nom du fichier contact simple (sans extension)", "MOA_contact_simple")
 name_map    = st.text_input("Nom du fichier carte HTML (sans extension)", "Carte_MOA")
 
-if file and (mode == "🧾 Mode simple" or (base_address or base_cp)):
+if file and (mode == "🧾 Mode simple" or base_address):
     try:
         with st.spinner("⏳ Traitement en cours..."):
             base_df = process_csv_to_df(file)
             if mode == "🚗 Mode enrichi (distances + carte)":
-                df, base_coords, coords_dict = compute_distances(base_df, base_address, base_cp)
+                df, base_coords, coords_dict = compute_distances(base_df, base_address)
             else:
                 df, base_coords, coords_dict = base_df.copy(), None, {}
 
@@ -280,7 +292,7 @@ if file and (mode == "🧾 Mode simple" or (base_address or base_cp)):
                                data=x2, file_name=f"{name_full}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            fmap = make_map(df, base_coords, coords_dict, base_address, base_cp)
+            fmap = make_map(df, base_coords, coords_dict, base_address)
             htmlb = map_to_html(fmap)
             st.download_button("📥 Télécharger la carte (HTML)",
                                data=htmlb, file_name=f"{name_map}.html", mime="text/html")
