@@ -10,12 +10,12 @@ from folium.features import DivIcon
 from streamlit.components.v1 import html as st_html
 
 # ========================== CONFIG ==========================
-TEMPLATE_PATH = "Sourcing base.xlsx"
-START_ROW = 11
+TEMPLATE_PATH = "Sourcing base.xlsx"  # ton modèle
+START_ROW = 11                        # première ligne de data dans le modèle
 
 PRIMARY = "#0b1d4f"
 BG      = "#f5f0eb"
-st.set_page_config(page_title="MOA – v13.6 (priorité indus + Contact MOA)", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA – v13.7 (priorité indus + Contact MOA)", page_icon="📍", layout="wide")
 st.markdown(f"""
 <style>
  .stApp {{background:{BG};font-family:Inter,system-ui,Roboto,Arial;}}
@@ -81,7 +81,7 @@ def geocode(query: str):
     if not query or not isinstance(query, str):
         return None
     query = _fix_postcode_spaces(_norm(query))
-    geolocator = Nominatim(user_agent="moa_geo_v13_6")
+    geolocator = Nominatim(user_agent="moa_geo_v13_7")
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
@@ -217,7 +217,7 @@ def process_csv_to_df(csv_bytes):
     out["Référent MOA"]   = df[colmap.get("referent","")].astype(str).fillna("") if colmap.get("referent") else df.get("Référent MOA", "")
     out["Catégories"]     = df[colmap.get("categorie","")].astype(str).fillna("") if colmap.get("categorie") else df.get("Catégories", "")
     out["Adresse"]        = df[colmap.get("adresse","")].astype(str).fillna("") if colmap.get("adresse") else df.get("Adresse", "")
-    out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
+    out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)  # ✅ calcul ici
     return out
 
 # ============== MULTI-SITES AVEC PRIORITÉ INDUS =============
@@ -349,7 +349,7 @@ def compute_distances(df, base_address):
             "Distance au projet": dist,
             "Catégories": row.get("Catégories",""),
             "Référent MOA": row.get("Référent MOA",""),
-            "Contact MOA": row.get("Contact MOA",""),  # ✅ bien présent
+            "Contact MOA": row.get("Contact MOA",""),  # ✅ email visible dans l'Excel
         })
         if coords:
             chosen_coords[name] = (coords[0], coords[1], country or "")
@@ -374,7 +374,7 @@ def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
         ws.cell(i,5, r.get("Distance au projet",""))
         ws.cell(i,6, r.get("Catégories",""))
         ws.cell(i,7, r.get("Référent MOA",""))
-        ws.cell(i,8, r.get("Contact MOA",""))
+        ws.cell(i,8, r.get("Contact MOA",""))  # ✅ colonne e-mail
     bio = BytesIO(); wb.save(bio); bio.seek(0); return bio
 
 def to_simple(df):
@@ -415,7 +415,7 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
-st.title("📍 MOA – v13.6 : priorité indus + Contact MOA + bouton carte (sans API)")
+st.title("📍 MOA – v13.7 : priorité indus + Contact MOA (Excel) + bouton carte (sans API)")
 
 mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
 base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)",
@@ -469,3 +469,4 @@ if file and (mode == "🧾 Mode simple" or base_address):
 
     except Exception as e:
         st.error(f"Erreur : {e}")
+
