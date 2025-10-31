@@ -15,7 +15,7 @@ START_ROW = 11
 
 PRIMARY = "#0b1d4f"
 BG      = "#f5f0eb"
-st.set_page_config(page_title="MOA – v12 sans API", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA – v13 sans API", page_icon="📍", layout="wide")
 st.markdown(f"""
 <style>
  .stApp {{background:{BG};font-family:Inter,system-ui,Roboto,Arial;}}
@@ -28,61 +28,39 @@ st.markdown(f"""
 
 # ====================== GEO & HELPERS =======================
 COUNTRY_WORDS = {"france","belgique","belgium","espagne","españa","portugal","italie","italia","deutschland","germany","suisse","switzerland","luxembourg"}
-CP_FALLBACK_RE = re.compile(r"\b[0-9A-Z]{4,7}\b", re.I)
+CP_FALLBACK_RE = re.compile(r"\b\d{4,6}\b")
 
 def clean_token(t:str)->str:
     return re.sub(r"\s+", " ", t).strip()
 
-def split_addresses_smart(addr: str) -> list[str]:
-    if not isinstance(addr, str) or addr.strip()=="":
-        return []
-    tokens = [clean_token(t) for t in addr.split(",")]
-    chunks, cur = [], []
-    for tok in tokens:
-        if not tok: continue
-        cur.append(tok)
-        joined = ", ".join(cur)
-        has_cp = bool(CP_FALLBACK_RE.search(joined))
-        has_country = any(w in joined.lower() for w in COUNTRY_WORDS)
-        if has_cp or has_country or len(cur) >= 3:
-            chunks.append(joined)
-            cur = []
-    if cur:
-        chunks.append(", ".join(cur))
-    uniq = []
-    for c in chunks:
-        c2 = clean_token(c)
-        if c2 and c2 not in uniq:
-            uniq.append(c2)
-    return uniq
-
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    geolocator = Nominatim(user_agent="moa_geo_v12")
+    """Renvoie (lat, lon, pays, code_postal)"""
+    geolocator = Nominatim(user_agent="moa_geo_v13")
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
         if loc:
             addr = loc.raw.get("address", {})
             country = addr.get("country", "France")
-            postcode = addr.get("postcode")
+            postcode = addr.get("postcode", "")
             return (loc.latitude, loc.longitude, country, postcode)
     except Exception:
         return None
     return None
 
 def distance_km(base_coords, coords):
-    """Distance géodésique simple (sans API)."""
+    """Distance à vol d’oiseau (km)."""
     if not coords or not base_coords:
         return None
     return round(geodesic(base_coords, coords).km)
 
 def extract_cp_fallback(text: str):
-    if not isinstance(text, str): return None
+    if not isinstance(text, str): return ""
     m = CP_FALLBACK_RE.search(text)
-    return m.group(0) if m else None
+    return m.group(0) if m else ""
 
-# ================ COLONNES & CONTACT MOA ====================
+# ================= COLONNES ET CONTACT MOA =================
 def _find_columns(cols):
     res={}
     for c in cols:
@@ -159,11 +137,11 @@ def process_csv_to_df(csv_bytes):
     out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
     return out
 
-# =========== Multi-implantations → site le plus proche =====
+# ================= DISTANCES & MULTI-SITES =================
 def pick_closest_site(addr_field: str, base_coords: tuple[float,float]):
-    candidates = split_addresses_smart(addr_field)
+    candidates = [a.strip() for a in addr_field.split(",") if a.strip()] or [addr_field]
     best = None
-    for cand in candidates if candidates else [addr_field]:
+    for cand in candidates:
         g = geocode(cand) or geocode(cand + ", France")
         if not g: continue
         lat, lon, country, postcode = g
@@ -176,7 +154,7 @@ def pick_closest_site(addr_field: str, base_coords: tuple[float,float]):
         return best[1], best[2], best[3], (best[4] or extract_cp_fallback(best[1]))
     return addr_field, None, "", extract_cp_fallback(addr_field)
 
-def compute_distances_multisite(df, base_address, base_cp):
+def compute_distances(df, base_address, base_cp):
     base_query = f"{base_address}, {base_cp}, France".strip()
     base = geocode(base_query) or geocode(base_address) or geocode(base_cp)
     if not base:
@@ -210,8 +188,9 @@ def compute_distances_multisite(df, base_address, base_cp):
 
 # ========================= EXCEL ============================
 def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
-    wb = load_workbook(template); ws = wb.worksheets[0]
-    max_cols = 8
+    wb = load_workbook(template)
+    ws = wb.worksheets[0]
+    max_cols = 9
     for r in range(start, ws.max_row+1):
         for c in range(1, max_cols+1):
             ws.cell(r, c, value=None)
@@ -262,7 +241,9 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
-st.title("📍 MOA – v12 sans API : multi-sites, distances géodésiques & carte")
+st.title("📍 MOA – v13 : mode simple / enrichi, sans API")
+
+mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
 
 left, right = st.columns([1,1])
 with left:
@@ -271,36 +252,44 @@ with right:
     base_cp      = st.text_input("📮 Code postal / Ville", placeholder="Ex : 33210")
 
 file = st.file_uploader("📄 Fichier CSV", type=["csv"])
+
 name_full   = st.text_input("Nom du fichier Excel complet (sans extension)", "Sourcing_MOA")
 name_simple = st.text_input("Nom du fichier contact simple (sans extension)", "MOA_contact_simple")
 name_map    = st.text_input("Nom du fichier carte HTML (sans extension)", "Carte_MOA")
 
-if file and (base_address or base_cp):
+if file and (mode == "🧾 Mode simple" or (base_address or base_cp)):
     try:
         with st.spinner("⏳ Traitement en cours..."):
             base_df = process_csv_to_df(file)
-            df, base_coords, coords_dict = compute_distances_multisite(base_df, base_address, base_cp)
+            if mode == "🚗 Mode enrichi (distances + carte)":
+                df, base_coords, coords_dict = compute_distances(base_df, base_address, base_cp)
+            else:
+                df, base_coords, coords_dict = base_df.copy(), None, {}
+
         st.success("✅ Traitement terminé")
 
+        # contact simple
         x1 = to_simple(base_df)
         st.download_button("⬇️ Télécharger le contact simple",
                            data=x1, file_name=f"{name_simple}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        x2 = to_excel(df)
-        st.download_button("⬇️ Télécharger l'Excel complet",
-                           data=x2, file_name=f"{name_full}.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        if mode == "🚗 Mode enrichi (distances + carte)":
+            x2 = to_excel(df)
+            st.download_button("⬇️ Télécharger l'Excel complet",
+                               data=x2, file_name=f"{name_full}.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-        fmap = make_map(df, base_coords, coords_dict, base_address, base_cp)
-        htmlb = map_to_html(fmap)
-        st.download_button("📥 Télécharger la carte (HTML)",
-                           data=htmlb, file_name=f"{name_map}.html", mime="text/html")
-        st_html(htmlb.getvalue().decode("utf-8"), height=520)
+            fmap = make_map(df, base_coords, coords_dict, base_address, base_cp)
+            htmlb = map_to_html(fmap)
+            st.download_button("📥 Télécharger la carte (HTML)",
+                               data=htmlb, file_name=f"{name_map}.html", mime="text/html")
+            st_html(htmlb.getvalue().decode("utf-8"), height=520)
+            st.caption("🧭 Distances calculées à vol d’oiseau (géodésiques).")
 
-        st.caption("🧭 Distances calculées à vol d’oiseau (géodésique, sans API).")
-        st.subheader("📋 Aperçu des données (site retenu)")
+        st.subheader("📋 Aperçu des données")
         st.dataframe(df.head(12))
+
     except Exception as e:
         st.error(f"Erreur : {e}")
 
