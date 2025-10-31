@@ -35,6 +35,43 @@ CP_FALLBACK_RE = re.compile(r"\b\d{4,6}\b")
 def clean_token(t:str)->str:
     return re.sub(r"\s+", " ", t).strip()
 
+# Correction typographique simple sur les communes françaises
+CP_CITY_FIX = {
+    "33210": "Langon",
+    "40300": "Hastingues",
+    "75018": "Paris",
+    # tu pourras facilement en ajouter ici si besoin
+}
+
+def geocode(query: str):
+    """Renvoie (lat, lon, pays, code_postal) avec correction CP + nettoyage."""
+    if not query or not isinstance(query, str):
+        return None
+    # Nettoyage CP 40 300 -> 40300
+    query = re.sub(r"(\d{2})\s?(\d{3})", r"\1\2", query)
+    
+    # Si on trouve un CP FR, on tente une correction du nom de ville
+    m = re.search(r"\b(\d{5})\b", query)
+    if m:
+        cp = m.group(1)
+        if cp in CP_CITY_FIX and CP_CITY_FIX[cp].lower() not in query.lower():
+            # ajoute la bonne commune si absente
+            query = f"{cp} {CP_CITY_FIX[cp]}, France"
+    
+    geolocator = Nominatim(user_agent="moa_geo_v13_2")
+    try:
+        time.sleep(1)
+        loc = geolocator.geocode(query, timeout=15, addressdetails=True)
+        if loc:
+            addr = loc.raw.get("address", {})
+            country = addr.get("country", "")
+            postcode = addr.get("postcode", "")
+            return (loc.latitude, loc.longitude, country, postcode)
+    except Exception:
+        return None
+    return None
+
+
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
     """Renvoie (lat, lon, pays, code_postal) avec nettoyage CP"""
