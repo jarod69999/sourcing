@@ -15,7 +15,7 @@ START_ROW = 11
 
 PRIMARY = "#0b1d4f"
 BG      = "#f5f0eb"
-st.set_page_config(page_title="MOA – v13.3 stable", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA – v13.5 (priorité indus)", page_icon="📍", layout="wide")
 st.markdown(f"""
 <style>
  .stApp {{background:{BG};font-family:Inter,system-ui,Roboto,Arial;}}
@@ -28,15 +28,16 @@ st.markdown(f"""
 
 # ====================== GEO & HELPERS =======================
 COUNTRY_WORDS = {
-    "france","belgique","belgium","espagne","españa","portugal",
-    "italie","italia","deutschland","germany","suisse","switzerland","luxembourg","belgie","belgië","belgique"
+    "france","belgique","belgium","belgie","belgië","espagne","españa","portugal",
+    "italie","italia","deutschland","germany","suisse","switzerland","luxembourg"
 }
-# 4 à 6 chiffres (FR=5 ; BE=4 ; certains CEDEX/étranger peuvent déborder)
 CP_FALLBACK_RE = re.compile(r"\b\d{4,6}\b")
+
+INDUS_TOKENS = ["implant-indus-2","implant-indus-3","implant-indus-4","implant-indus-5"]
+HQ_TOKEN     = "adresse-du-siège"
 
 def _norm(text: str) -> str:
     if not isinstance(text,str): return ""
-    # normalise guillemets/apostrophes exotiques
     text = unicodedata.normalize("NFKC", text)
     text = text.replace("’","'").replace("–","-").replace("—","-")
     text = re.sub(r"\s+", " ", text).strip()
@@ -46,17 +47,24 @@ def _fix_postcode_spaces(text: str) -> str:
     # "40 300" -> "40300", "75 018" -> "75018"
     return re.sub(r"\b(\d{2})\s?(\d{3})\b", r"\1\2", text)
 
+def has_explicit_country(s: str) -> bool:
+    return any(w in s.lower() for w in COUNTRY_WORDS)
+
+def extract_cp_fallback(text: str) -> str:
+    if not isinstance(text, str): return ""
+    t = _fix_postcode_spaces(_norm(text))
+    m = CP_FALLBACK_RE.search(t)
+    return m.group(0) if m else ""
+
 def extract_cp_city(text: str):
     """Essaie d'extraire (cp, ville) FR/BE à partir de l'adresse brute."""
     if not isinstance(text,str): return ("","")
     t = _fix_postcode_spaces(_norm(text))
-    # pattern 1: '40300 Hastingues' (CP + ville)
+    # pattern 1: '40300 Hastingues'
     m = re.search(r"\b(\d{4,5})\b[ ,\-]*([A-Za-zÀ-ÖØ-öø-ÿ' \-]{2,})", t)
     if m:
         cp = m.group(1)
-        # coupe ville à la prochaine virgule/fin
         ville = m.group(2).split(",")[0].strip()
-        # nettoie suffixes type 'CEDEX ...'
         ville = re.sub(r"\bcedex\b.*$", "", ville, flags=re.I).strip()
         return (cp, ville)
     # pattern 2: 'Hastingues 40300'
@@ -67,16 +75,13 @@ def extract_cp_city(text: str):
         return (m.group(2), ville)
     return ("","")
 
-def has_explicit_country(s: str) -> bool:
-    return any(w in s.lower() for w in COUNTRY_WORDS)
-
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    """Renvoie (lat, lon, pays, code_postal). Nettoyage CP + correction base CP/ville."""
+    """Renvoie (lat, lon, pays, code_postal). Nettoyage CP."""
     if not query or not isinstance(query, str):
         return None
     query = _fix_postcode_spaces(_norm(query))
-    geolocator = Nominatim(user_agent="moa_geo_v13_3")
+    geolocator = Nominatim(user_agent="moa_geo_v13_5")
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
@@ -92,33 +97,30 @@ def geocode(query: str):
 def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "France"):
     """
     Pipeline robuste :
-      1) geocode(adresse brute)
+      1) geocode(adresse brute) [+ France si pas de pays]
       2) si échec et on peut extraire CP+Ville -> geocode("CP Ville, {country}")
-      3) si échec -> geocode("Ville, {country}") puis geocode("CP, {country}")
+      3) puis ville seule, puis CP seul
     """
     s = _fix_postcode_spaces(_norm(raw_addr))
     explicit_overseas = has_explicit_country(s)
-    # 1) essai direct (pas d'ajout 'France' si un pays est déjà présent)
     g = geocode(s if explicit_overseas else f"{s}, {assumed_country_hint}")
     if g: return g
 
     cp, ville = extract_cp_city(s)
-    if cp and ville:
-        # 2) CP + ville prioritaire
-        g = geocode(f"{cp} {ville}, {assumed_country_hint}" if not explicit_overseas else f"{cp} {ville}")
-        if g: return g
-        # 3) ville seule
-        g = geocode(f"{ville}, {assumed_country_hint}" if not explicit_overseas else ville)
-        if g: return g
-        # 4) CP seul
-        g = geocode(f"{cp}, {assumed_country_hint}" if not explicit_overseas else cp)
-        if g: return g
+    if cp or ville:
+        if cp and ville:
+            g = geocode(f"{cp} {ville}" + ("" if explicit_overseas else ", France"))
+            if g: return g
+        if ville:
+            g = geocode(ville + ("" if explicit_overseas else ", France"))
+            if g: return g
+        if cp:
+            g = geocode(cp + ("" if explicit_overseas else ", France"))
+            if g: return g
 
-    # dernier essai brut (sans hint) si on n'avait pas de pays explicite
     if not explicit_overseas:
         g = geocode(s)
         if g: return g
-
     return None
 
 def distance_km(base_coords, coords):
@@ -126,13 +128,7 @@ def distance_km(base_coords, coords):
         return None
     return round(geodesic(base_coords, coords).km)
 
-def extract_cp_fallback(text: str):
-    if not isinstance(text, str): return ""
-    t = _fix_postcode_spaces(_norm(text))
-    m = CP_FALLBACK_RE.search(t)
-    return m.group(0) if m else ""
-
-# ================= COLONNES ET CONTACT MOA =================
+# ================= COLONNES & CONTACT MOA ===================
 def _find_columns(cols):
     res={}
     for c in cols:
@@ -162,12 +158,24 @@ def _tokens(name:str)->list[str]:
     return [t for t in re.split(r"[\s\-]+", name.lower()) if len(t)>=2]
 
 def choose_contact_moa(row, colmap):
+    """
+    1) Si 'email_referent' présent -> le prendre.
+    2) Sinon, si 'Référent MOA' texte présent -> matching sur Tech/Dir/Comce/Com.
+    3) Sinon -> premier contact dispo dans l'ordre: Tech, Dir, Comce, Com, Contacts.
+    """
+    # (1) email référent direct
     if colmap.get("email_referent"):
         v = row.get(colmap["email_referent"], "")
         if isinstance(v, str) and "@" in v:
             return v.strip()
-    referent = str(row.get("Référent MOA",""))
-    toks = _tokens(referent)
+
+    # (2) matching sur nom
+    referent = str(row.get("Référent MOA","")).strip()
+    if referent:
+        toks = _tokens(referent)
+    else:
+        toks = []
+
     cands = {}
     for k in ["Tech","Dir","Comce","Com"]:
         col = colmap.get(k)
@@ -177,22 +185,27 @@ def choose_contact_moa(row, colmap):
                 em = _first_email_in_text(val) or (val if "@" in val else None)
                 if em:
                     cands[k]=em
-    best_key, best_score = None, -1
-    for k, em in cands.items():
-        local = _email_local(em)
-        score = sum(t in local for t in toks) if toks else 0
-        if score > best_score:
-            best_score = score; best_key = k
-    if best_key and best_score>0:
-        return cands[best_key]
+    if toks and cands:
+        best_key, best_score = None, -1
+        for k, em in cands.items():
+            local = _email_local(em)
+            score = sum(t in local for t in toks)
+            if score > best_score:
+                best_score = score; best_key = k
+        if best_key and best_score>0:
+            return cands[best_key]
+
+    # (3) premier dispo
     for k in ["Tech","Dir","Comce","Com"]:
         if k in cands:
             return cands[k]
+
     contacts_col = colmap.get("contacts")
     if contacts_col:
         fallback = _first_email_in_text(str(row.get(contacts_col,"")))
         if fallback:
             return fallback
+
     return ""
 
 def process_csv_to_df(csv_bytes):
@@ -206,66 +219,117 @@ def process_csv_to_df(csv_bytes):
     out["Référent MOA"]   = df[colmap.get("referent","")].astype(str).fillna("") if colmap.get("referent") else df.get("Référent MOA", "")
     out["Catégories"]     = df[colmap.get("categorie","")].astype(str).fillna("") if colmap.get("categorie") else df.get("Catégories", "")
     out["Adresse"]        = df[colmap.get("adresse","")].astype(str).fillna("") if colmap.get("adresse") else df.get("Adresse", "")
+    # Contact MOA (avec fallback si référent vide)
     out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
     return out
 
-# ============== DISTANCES & MULTI-SITES ROBUSTES ===========
-def pick_closest_site(addr_field: str, base_coords: tuple[float,float]):
+# ============== MULTI-SITES AVEC PRIORITÉ INDUS =============
+def _split_multi_addresses(addr_field: str):
     """
-    - Conserve l'adresse complète en sortie
-    - Détecte les pays ≠ France et n'ajoute pas 'France'
-    - Fallback sur 'CP Ville' pour obtenir des coords si l'adresse complète échoue
+    Découpe souple : virgules, points-virgules, slash, retours ligne.
+    Conserve chaque segment brut.
     """
-    s = _norm(addr_field)
-    # split doux sur virgules – on teste les candidats + l'adresse entière
-    parts = [p.strip() for p in s.split(",") if p.strip()]
-    candidates = parts if parts else [s]
-    if s not in candidates:
-        candidates.append(s)
+    if not isinstance(addr_field, str) or not addr_field.strip():
+        return []
+    text = _norm(addr_field)
+    parts = re.split(r"[;\n/]", text)
+    # re-split sur virgules mais en conservant les sous-ensembles lisibles
+    flat = []
+    for p in parts:
+        chunks = [c.strip() for c in p.split(",") if c.strip()]
+        if chunks:
+            # regrouper par 2-3 pour éviter d'éclater rue/ville
+            buf=[]; acc=[]
+            for c in chunks:
+                acc.append(c)
+                joined = ", ".join(acc)
+                if len(acc)>=3 or extract_cp_fallback(joined):
+                    buf.append(joined); acc=[]
+            if acc: buf.append(", ".join(acc))
+            flat.extend(buf)
+    # ajoute l'original si rien
+    if not flat:
+        flat = [text]
+    # unique en gardant l'ordre
+    seen=set(); out=[]
+    for e in flat:
+        if e not in seen:
+            out.append(e); seen.add(e)
+    return out
 
-    best = None
+def _priority_key(segment: str):
+    """Renvoie (is_indus_rank, is_hq, base_text) pour le tri/priorité."""
+    s = segment.lower()
+    indus_rank = -1
+    for idx, tok in enumerate(INDUS_TOKENS, start=1):
+        if tok in s:
+            indus_rank = idx  # 1..4 si présent
+            break
+    is_hq = (HQ_TOKEN in s)
+    return (indus_rank, is_hq, segment)
+
+def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float,float]):
+    """
+    Règle :
+    1) parmi les segments contenant implant-indus-2/3/4/5 -> garder le PLUS PROCHE
+    2) s'il n'y en a aucun -> garder celui qui contient 'Adresse-du-siège'
+    3) sinon -> garder le premier segment dispo
+    Pays :
+      - si un pays ≠ France est détecté, on le conserve
+      - sinon on ajoute 'France' dans les fallbacks de géocodage
+    """
+    segments = _split_multi_addresses(addr_field) or [addr_field]
+    chosen = None
     chosen_country = ""
     chosen_cp = ""
+    best_dist = None
 
-    for cand in candidates:
-        overseas = has_explicit_country(cand)
-        g = try_geocode_with_fallbacks(cand, "France")
+    # 1) chercher segments indus
+    indus_segments = [s for s in segments if any(tok in s.lower() for tok in INDUS_TOKENS)]
+    candidates = indus_segments if indus_segments else segments
+
+    # Si aucun indus : essayer siège en priorité sinon premier
+    if not indus_segments:
+        hq = [s for s in segments if HQ_TOKEN in s.lower()]
+        if hq:
+            candidates = hq
+
+    # géocoder les candidats, prendre le + proche
+    for seg in candidates:
+        g = try_geocode_with_fallbacks(seg, "France")
         if not g:
             continue
         lat, lon, country, postcode = g
         d = distance_km(base_coords, (lat, lon))
-        if best is None or d < best[0]:
-            best = (d, cand, (lat,lon))
-            chosen_country = country or ("France" if not overseas else "")
-            # CP : si geocode n'a pas de postcode, tente extraction depuis texte
-            chosen_cp = postcode or extract_cp_fallback(cand)
+        if (chosen is None) or (d is not None and (best_dist is None or d < best_dist)):
+            chosen = seg
+            best_dist = d
+            chosen_country = country or ("France" if not has_explicit_country(seg) else "")
+            chosen_cp = postcode or extract_cp_fallback(seg)
 
-    if best:
-        return best[1], best[2], chosen_country, chosen_cp
+    # si rien géocodé dans les candidats, on renvoie le premier segment brut avec CP extrait
+    if chosen is None:
+        raw = segments[0]
+        return raw, None, "", extract_cp_fallback(raw)
 
-    # aucun géocode → on garde l’adresse brute + CP extrait
-    return s, None, "", extract_cp_fallback(s)
+    return chosen, (None if best_dist is None else (0,0)) or (lat, lon), chosen_country, chosen_cp, best_dist
 
 def compute_distances(df, base_address):
-    """Une seule ligne d'entrée : CP+ville ou adresse complète ; pays respecté si présent."""
+    """Adresse du projet (CP+ville ou complète). Respect pays si présent."""
     if not base_address.strip():
         st.warning("⚠️ Aucune adresse de référence fournie.")
         return df, None, {}
 
     q = _fix_postcode_spaces(_norm(base_address))
-    if not has_explicit_country(q):
-        q_base = f"{q}, France"
-    else:
-        q_base = q
-
+    q_base = q if has_explicit_country(q) else f"{q}, France"
     base = geocode(q_base)
     if not base:
-        # dernier fallback : si on peut extraire CP+ville, on essaye ça
         cp, ville = extract_cp_city(q)
         if cp or ville:
             hint = f"{cp} {ville}".strip()
-            hint = f"{hint}, France" if (hint and not has_explicit_country(q)) else hint
+            hint = hint if has_explicit_country(q) else f"{hint}, France"
             base = geocode(hint)
+
     if not base:
         st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'.")
         df2 = df.copy()
@@ -275,20 +339,23 @@ def compute_distances(df, base_address):
         return df2, None, {}
 
     base_coords = (base[0], base[1])
+
     chosen_coords, chosen_rows = {}, []
-
     for _, row in df.iterrows():
-        name = row.get("Raison sociale","").strip()
-        adresse = row.get("Adresse","")
-        kept_addr, coords, country, cp = pick_closest_site(adresse, base_coords)
+        name = str(row.get("Raison sociale","")).strip()
+        adresse = str(row.get("Adresse",""))
 
-        # si pas de coords mais CP+ville extractables → re-tente pour débloquer la distance
-        if not coords:
+        kept_addr, coords_or_dummy, country, cp, best_dist = pick_site_with_indus_priority(adresse, base_coords)
+
+        # si coords_or_dummy == None, tenter CP+Ville pour débloquer coords → distance
+        coords = None
+        if isinstance(coords_or_dummy, tuple):
+            if len(coords_or_dummy) == 2 and coords_or_dummy != (0,0):
+                coords = coords_or_dummy
+        if coords is None:
             cpe, villee = extract_cp_city(kept_addr)
             if cpe or villee:
-                g = geocode(f"{cpe} {villee}".strip())
-                if not g and (cpe or villee) and not has_explicit_country(kept_addr):
-                    g = geocode(f"{cpe} {villee}, France".strip())
+                g = geocode(f"{cpe} {villee}".strip() + ("" if has_explicit_country(kept_addr) else ", France"))
                 if g:
                     coords = (g[0], g[1])
                     if not country:
@@ -296,12 +363,12 @@ def compute_distances(df, base_address):
                     if not cp:
                         cp = g[3] or cpe
 
-        dist = distance_km(base_coords, coords) if coords else None
+        dist = distance_km(base_coords, coords) if coords else (round(best_dist) if best_dist is not None else None)
 
         chosen_rows.append({
             "Raison sociale": name,
             "Pays": country or "",
-            "Adresse": kept_addr,     # adresse complète conservée même à l'étranger
+            "Adresse": kept_addr,           # adresse complète conservée (étranger inclus)
             "Code postal": cp or "",
             "Distance au projet": dist,
             "Catégories": row.get("Catégories",""),
@@ -369,7 +436,7 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
-st.title("📍 MOA – v13.3 : robustesse Hastingues/étranger, sans API")
+st.title("📍 MOA – v13.5 : priorité indus + bouton carte (sans API)")
 
 mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
 base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)",
@@ -380,6 +447,10 @@ file = st.file_uploader("📄 Fichier CSV", type=["csv"])
 name_full   = st.text_input("Nom du fichier Excel complet (sans extension)", "Sourcing_MOA")
 name_simple = st.text_input("Nom du fichier contact simple (sans extension)", "MOA_contact_simple")
 name_map    = st.text_input("Nom du fichier carte HTML (sans extension)", "Carte_MOA")
+
+generate_map = False
+if mode == "🚗 Mode enrichi (distances + carte)":
+    generate_map = st.button("🗺️ Générer la carte maintenant")
 
 if file and (mode == "🧾 Mode simple" or base_address):
     try:
@@ -404,15 +475,17 @@ if file and (mode == "🧾 Mode simple" or base_address):
                                data=x2, file_name=f"{name_full}.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-            fmap = make_map(df, base_coords, coords_dict, base_address)
-            htmlb = map_to_html(fmap)
-            st.download_button("📥 Télécharger la carte (HTML)",
-                               data=htmlb, file_name=f"{name_map}.html", mime="text/html")
-            st_html(htmlb.getvalue().decode("utf-8"), height=520)
-            st.caption("🧭 Distances calculées à vol d’oiseau (géodésiques).")
+            if generate_map and base_coords:
+                fmap = make_map(df, base_coords, coords_dict, base_address)
+                htmlb = map_to_html(fmap)
+                st.download_button("📥 Télécharger la carte (HTML)",
+                                   data=htmlb, file_name=f"{name_map}.html", mime="text/html")
+                st_html(htmlb.getvalue().decode("utf-8"), height=520)
+                st.caption("🧭 Distances calculées à vol d’oiseau (géodésiques).")
 
         st.subheader("📋 Aperçu des données")
         st.dataframe(df.head(12))
 
     except Exception as e:
         st.error(f"Erreur : {e}")
+
