@@ -10,12 +10,12 @@ from folium.features import DivIcon
 from streamlit.components.v1 import html as st_html
 
 # ========================== CONFIG ==========================
-TEMPLATE_PATH = "Sourcing base.xlsx"  # ton modèle
-START_ROW = 11                        # première ligne de data dans le modèle
+TEMPLATE_PATH = "Sourcing base.xlsx"   # modèle Excel avec en-têtes
+START_ROW = 11                         # 1re ligne de data dans le modèle
 
 PRIMARY = "#0b1d4f"
 BG      = "#f5f0eb"
-st.set_page_config(page_title="MOA – v13.7 (priorité indus + Contact MOA)", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA – v13.8 (indus + email smart)", page_icon="📍", layout="wide")
 st.markdown(f"""
 <style>
  .stApp {{background:{BG};font-family:Inter,system-ui,Roboto,Arial;}}
@@ -32,6 +32,7 @@ COUNTRY_WORDS = {
     "italie","italia","deutschland","germany","suisse","switzerland","luxembourg"
 }
 CP_FALLBACK_RE = re.compile(r"\b\d{4,6}\b")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 
 INDUS_TOKENS = ["implant-indus-2","implant-indus-3","implant-indus-4","implant-indus-5"]
 HQ_TOKEN     = "adresse-du-siège"
@@ -77,11 +78,11 @@ def extract_cp_city(text: str):
 
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    """Renvoie (lat, lon, pays, code_postal). Nettoyage CP."""
+    """Renvoie (lat, lon, pays, code_postal)."""
     if not query or not isinstance(query, str):
         return None
     query = _fix_postcode_spaces(_norm(query))
-    geolocator = Nominatim(user_agent="moa_geo_v13_7")
+    geolocator = Nominatim(user_agent="moa_geo_v13_8")
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
@@ -96,10 +97,11 @@ def geocode(query: str):
 
 def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "France"):
     """
-    Pipeline robuste :
-      1) geocode(adresse brute) [+ France si pas de pays]
-      2) si échec et on peut extraire CP+Ville -> geocode("CP Ville, {country}")
-      3) puis ville seule, puis CP seul
+    1) adresse brute (+ France si pas de pays)
+    2) CP+Ville
+    3) Ville seule
+    4) CP seul
+    5) re-essai brut
     """
     s = _fix_postcode_spaces(_norm(raw_addr))
     explicit_overseas = has_explicit_country(s)
@@ -128,27 +130,52 @@ def distance_km(base_coords, coords):
         return None
     return round(geodesic(base_coords, coords).km)
 
-# ================= COLONNES & CONTACT MOA ===================
+# ================= COLONNES & CONTACT MOA (v12-style+) ======
 def _find_columns(cols):
-    res={}
+    """
+    Détection robuste des colonnes :
+    - champs clés (raison/catégorie/référent/email_referent/adresse)
+    - groupes de colonnes contacts (tech/dir/comce/com)
+    - colonnes 'contacts' génériques
+    """
+    res = {
+        "tech_cols": [], "dir_cols": [], "comce_cols": [], "com_cols": [], "contact_cols": []
+    }
     for c in cols:
-        cl=c.lower()
-        if "raison" in cl and "sociale" in cl: res["raison"]=c
-        elif "catég" in cl or "categorie" in cl: res["categorie"]=c
-        elif ("référent" in cl and "moa" in cl) or ("referent" in cl and "moa" in cl): res["referent"]=c
-        elif ("email" in cl and "referent" in cl) or ("email" in cl and "référent" in cl): res["email_referent"]=c
-        elif "contacts" in cl: res["contacts"]=c
-        elif "adress" in cl: res["adresse"]=c
-        elif cl=="tech": res["Tech"]=c
-        elif cl=="dir":  res["Dir"]=c
-        elif cl=="comce":res["Comce"]=c
-        elif cl=="com":  res["Com"]=c
+        cl = c.lower().strip()
+
+        # clés fixes
+        if "raison" in cl and "sociale" in cl: res["raison"] = c
+        elif "catég" in cl or "categorie" in cl: res["categorie"] = c
+        elif ("référent" in cl and "moa" in cl) or ("referent" in cl and "moa" in cl): res["referent"] = c
+        elif ("email" in cl and "referent" in cl) or ("email" in cl and "référent" in cl): res["email_referent"] = c
+        elif "adress" in cl: res["adresse"] = c
+
+        # contacts : large
+        # on classe par priorité via mots-clés
+        if "tech" in cl:
+            res["tech_cols"].append(c)
+        if "dir" in cl or "dirige" in cl:
+            res["dir_cols"].append(c)
+        if "comce" in cl:  # si tu as cet acronyme précis
+            res["comce_cols"].append(c)
+        # "com" peut être ambigu (company). On limite aux variantes usuelles:
+        if re.search(r"\bcom\b|\bcommercial", cl):
+            res["com_cols"].append(c)
+        # colonnes génériques "contact" (si pas déjà rangées)
+        if "contact" in cl and c not in (res["tech_cols"] + res["dir_cols"] + res["comce_cols"] + res["com_cols"]):
+            res["contact_cols"].append(c)
+
+        # colonne simple "contacts"
+        if "contacts" == cl or cl.startswith("contacts "):
+            res["contacts"] = c
+
     return res
 
 def _first_email_in_text(text:str)->str|None:
     if not isinstance(text,str): return None
-    emails = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text)
-    return emails[0] if emails else None
+    m = EMAIL_RE.search(text)
+    return m.group(0) if m else None
 
 def _email_local(e:str)->str:
     return e.split("@",1)[0].lower() if isinstance(e,str) else ""
@@ -157,67 +184,87 @@ def _tokens(name:str)->list[str]:
     if not isinstance(name,str): return []
     return [t for t in re.split(r"[\s\-]+", name.lower()) if len(t)>=2]
 
+def _emails_from_columns(row, cols):
+    for col in cols:
+        val = str(row.get(col, "")).strip()
+        if not val: 
+            continue
+        em = _first_email_in_text(val) or (val if "@" in val else None)
+        if em:
+            return em
+    return None
+
 def choose_contact_moa(row, colmap):
     """
-    1) Si 'email_referent' présent -> le prendre.
-    2) Sinon, si 'Référent MOA' texte présent -> matching sur Tech/Dir/Comce/Com.
-    3) Sinon -> premier contact dispo dans l'ordre: Tech, Dir, Comce, Com, Contacts.
+    Priorité:
+      1) email_referent direct
+      2) matching nom référent sur groupes Tech/Dir/Comce/Com (v12-style: colonnes nommées librement)
+      3) fallback premier dispo Tech -> Dir -> Comce -> Com -> Contacts génériques (y compris "Contacts")
     """
-    # (1) email référent direct
+    # 1) email référent explicite
     if colmap.get("email_referent"):
         v = row.get(colmap["email_referent"], "")
-        if isinstance(v, str) and "@" in v:
+        if isinstance(v,str) and "@" in v:
             return v.strip()
 
-    # (2) matching sur nom
-    referent = str(row.get("Référent MOA","")).strip()
-    toks = _tokens(referent) if referent else []
+    # groupes détectés
+    tech = colmap.get("tech_cols", [])
+    diro = colmap.get("dir_cols", [])
+    comce = colmap.get("comce_cols", [])
+    com = colmap.get("com_cols", [])
+    generic = colmap.get("contact_cols", [])
+    contacts_simple = [colmap.get("contacts")] if colmap.get("contacts") else []
 
-    cands = {}
-    for k in ["Tech","Dir","Comce","Com"]:
-        col = colmap.get(k)
-        if col:
-            val = str(row.get(col,"")).strip()
-            if val:
+    # 2) matching par nom du référent (si fourni)
+    referent = str(row.get(colmap.get("referent",""), "")).strip() if colmap.get("referent") else ""
+    toks = _tokens(referent)
+
+    if toks:
+        # on rassemble les candidats (ordre de priorité)
+        scan_groups = [tech, diro, comce, com, generic, contacts_simple]
+        for group in scan_groups:
+            # on cherche l'email dont la partie locale match le plus de tokens
+            best_email, best_score = None, -1
+            for col in group:
+                val = str(row.get(col, "")).strip()
                 em = _first_email_in_text(val) or (val if "@" in val else None)
-                if em:
-                    cands[k]=em
-    if toks and cands:
-        best_key, best_score = None, -1
-        for k, em in cands.items():
-            local = _email_local(em)
-            score = sum(t in local for t in toks)
-            if score > best_score:
-                best_score = score; best_key = k
-        if best_key and best_score>0:
-            return cands[best_key]
+                if not em: 
+                    continue
+                local = _email_local(em)
+                score = sum(t in local for t in toks)
+                if score > best_score:
+                    best_score, best_email = score, em
+            if best_email and best_score > 0:
+                return best_email
 
-    # (3) premier dispo
-    for k in ["Tech","Dir","Comce","Com"]:
-        if k in cands:
-            return cands[k]
-
-    contacts_col = colmap.get("contacts")
-    if contacts_col:
-        fallback = _first_email_in_text(str(row.get(contacts_col,"")))
-        if fallback:
-            return fallback
+    # 3) fallback: premier email dispo selon l'ordre Tech -> Dir -> Comce -> Com -> Contacts génériques -> "Contacts"
+    for group in [tech, diro, comce, com, generic, contacts_simple]:
+        em = _emails_from_columns(row, group)
+        if em:
+            return em
 
     return ""
 
 def process_csv_to_df(csv_bytes):
-    """Lit le CSV et construit le DF de base avec Contact MOA déjà calculé."""
+    """Lit le CSV et construit le DF de base avec Contact MOA déjà calculé (v12-style+)."""
     try:
         df = pd.read_csv(csv_bytes, sep=None, engine="python")
     except Exception:
         df = pd.read_csv(csv_bytes, sep=";", engine="python")
     colmap = _find_columns(df.columns)
+
     out = pd.DataFrame()
-    out["Raison sociale"] = df[colmap.get("raison","")].astype(str).fillna("") if colmap.get("raison") else df.get("Raison sociale", "")
-    out["Référent MOA"]   = df[colmap.get("referent","")].astype(str).fillna("") if colmap.get("referent") else df.get("Référent MOA", "")
-    out["Catégories"]     = df[colmap.get("categorie","")].astype(str).fillna("") if colmap.get("categorie") else df.get("Catégories", "")
-    out["Adresse"]        = df[colmap.get("adresse","")].astype(str).fillna("") if colmap.get("adresse") else df.get("Adresse", "")
-    out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)  # ✅ calcul ici
+    out["Raison sociale"] = (df[colmap.get("raison","")].astype(str).fillna("")
+                             if colmap.get("raison") else df.get("Raison sociale", ""))
+    out["Référent MOA"]   = (df[colmap.get("referent","")].astype(str).fillna("")
+                             if colmap.get("referent") else df.get("Référent MOA", ""))
+    out["Catégories"]     = (df[colmap.get("categorie","")].astype(str).fillna("")
+                             if colmap.get("categorie") else df.get("Catégories", ""))
+    out["Adresse"]        = (df[colmap.get("adresse","")].astype(str).fillna("")
+                             if colmap.get("adresse") else df.get("Adresse", ""))
+
+    # Contact MOA (e-mail) avec la logique élargie
+    out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
     return out
 
 # ============== MULTI-SITES AVEC PRIORITÉ INDUS =============
@@ -292,8 +339,9 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float,floa
         raw = segments[0]
         return raw, None, "", extract_cp_fallback(raw), None
 
-    return chosen_seg, (best_lat, best_lon), chosen_country, chosen_cp, best_dist  # toujours 5 valeurs
+    return chosen_seg, (best_lat, best_lon), chosen_country, chosen_cp, best_dist  # 5 valeurs
 
+# =================== DISTANCES & FINALE =====================
 def compute_distances(df, base_address):
     """Adresse du projet (CP+ville ou complète). Respect pays si présent."""
     if not base_address.strip():
@@ -349,7 +397,7 @@ def compute_distances(df, base_address):
             "Distance au projet": dist,
             "Catégories": row.get("Catégories",""),
             "Référent MOA": row.get("Référent MOA",""),
-            "Contact MOA": row.get("Contact MOA",""),  # ✅ email visible dans l'Excel
+            "Contact MOA": row.get("Contact MOA",""),  # email résolu, visible
         })
         if coords:
             chosen_coords[name] = (coords[0], coords[1], country or "")
@@ -359,7 +407,7 @@ def compute_distances(df, base_address):
 
 # ========================= EXCEL ============================
 def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
-    """Excel complet avec colonnes séparées (Adresse / Code postal) + Contact MOA visible."""
+    """Excel complet : Adresse / CP séparés + Contact MOA e-mail."""
     wb = load_workbook(template)
     ws = wb.worksheets[0]
     max_cols = 8
@@ -374,7 +422,7 @@ def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
         ws.cell(i,5, r.get("Distance au projet",""))
         ws.cell(i,6, r.get("Catégories",""))
         ws.cell(i,7, r.get("Référent MOA",""))
-        ws.cell(i,8, r.get("Contact MOA",""))  # ✅ colonne e-mail
+        ws.cell(i,8, r.get("Contact MOA",""))   # e-mail dans Excel
     bio = BytesIO(); wb.save(bio); bio.seek(0); return bio
 
 def to_simple(df):
@@ -415,7 +463,7 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
-st.title("📍 MOA – v13.7 : priorité indus + Contact MOA (Excel) + bouton carte (sans API)")
+st.title("📍 MOA – v13.8 : priorité indus + Contact MOA (email) + bouton carte (sans API)")
 
 mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
 base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)",
@@ -434,7 +482,7 @@ if mode == "🚗 Mode enrichi (distances + carte)":
 if file and (mode == "🧾 Mode simple" or base_address):
     try:
         with st.spinner("⏳ Traitement en cours..."):
-            base_df = process_csv_to_df(file)  # ✅ Contact MOA calculé ici
+            base_df = process_csv_to_df(file)       # ✅ Contact MOA e-mail déjà calculé (v12-style+)
             if mode == "🚗 Mode enrichi (distances + carte)":
                 df, base_coords, coords_dict = compute_distances(base_df, base_address)
             else:
@@ -442,14 +490,14 @@ if file and (mode == "🧾 Mode simple" or base_address):
 
         st.success("✅ Traitement terminé")
 
-        # contact simple (inclut Contact MOA)
+        # contact simple
         x1 = to_simple(base_df)
         st.download_button("⬇️ Télécharger le contact simple",
                            data=x1, file_name=f"{name_simple}.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         if mode == "🚗 Mode enrichi (distances + carte)":
-            # Excel complet (Adresse + CP séparés + Contact MOA)
+            # Excel complet
             x2 = to_excel(df)
             st.download_button("⬇️ Télécharger l'Excel complet",
                                data=x2, file_name=f"{name_full}.xlsx",
