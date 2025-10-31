@@ -90,6 +90,16 @@ def geocode(query: str):
         except Exception:
             continue
     return None
+ 
+# === test du géocodeur ===
+if st.button("🧭 Tester Nominatim (adresse exemple)"):
+    from geopy.geocoders import Nominatim
+    geolocator = Nominatim(user_agent="test_moa")
+    loc = geolocator.geocode("Balbigny, France", addressdetails=True)
+    if loc:
+        st.success(f"✅ Géocode OK : {loc.address}")
+    else:
+        st.error("❌ Géocodeur ne répond rien.")
 
 # =========================================================
 # DISTANCE À VOL D’OISEAU
