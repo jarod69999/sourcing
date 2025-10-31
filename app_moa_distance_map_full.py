@@ -1,4 +1,4 @@
-# app_moa_distance_map_full_v30.py
+# app_moa_distance_map_full_v31.py
 import streamlit as st
 import pandas as pd
 import re, time, unicodedata
@@ -6,16 +6,13 @@ from io import BytesIO
 from geopy.geocoders import Nominatim
 from geopy.distance import geodesic
 from openpyxl import load_workbook
+import folium
 from streamlit.components.v1 import html as st_html
 
-# =========================================================
-# CONFIG
-# =========================================================
+# ====== CONFIG UI ======
 TEMPLATE_PATH = "Sourcing base.xlsx"
 START_ROW = 11
-
-PRIMARY = "#0b1d4f"
-BG = "#f5f0eb"
+PRIMARY = "#0b1d4f"; BG = "#f5f0eb"
 st.markdown(f"""
 <style>
  .stApp {{background:{BG};font-family:Inter,system-ui,Roboto,Arial;}}
@@ -24,239 +21,227 @@ st.markdown(f"""
 </style>
 """, unsafe_allow_html=True)
 
-# =========================================================
-# UTILS
-# =========================================================
-CP_FR_RE = re.compile(r"\b\d{5}\b")
-EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+# ====== UTILS ======
+CP_RE = re.compile(r"\b\d{4,7}\b")  # FR 5, mais tolère 4–7 pour cas bizarres
+def _norm(s:str)->str:
+    if not isinstance(s,str): return ""
+    s = "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+    return re.sub(r"[^a-z0-9]+","",s.lower())
+def extract_cp(txt): 
+    if not isinstance(txt,str): return ""
+    m = CP_RE.search(txt); return m.group(0) if m else ""
+def km(a,b): return round(geodesic(a,b).km)
 
-def extract_postcode(text: str) -> str | None:
-    if not isinstance(text, str): return None
-    m = CP_FR_RE.search(text)
-    return m.group(0) if m else None
-
-def distance_km(a, b):
-    """Distance à vol d’oiseau en km."""
-    return round(geodesic(a, b).km)
-
-# =========================================================
-# GÉOCODAGE
-# =========================================================
+# ====== GEOCODING ======
 @st.cache_data(show_spinner=False)
-def geocode(query: str):
-    """Géocodage Nominatim propre, renvoie (lat, lon, country, cp, adresse_propre)."""
-    if not isinstance(query, str) or not query.strip():
-        return None
-    geolocator = Nominatim(user_agent="moa_geo_v30")
-    query = query.strip()
-    tries = [query]
-    if "france" not in query.lower():
-        tries.append(query + ", France")
-
+def geocode(q:str):
+    if not isinstance(q,str) or not q.strip(): return None
+    geo = Nominatim(user_agent="moa_geo_v31")
+    tries = [q.strip()]
+    if "france" not in q.lower(): tries.append(q.strip()+", France")
     for t in tries:
         try:
             time.sleep(1)
-            loc = geolocator.geocode(t, timeout=12, addressdetails=True)
+            loc = geo.geocode(t, timeout=12, addressdetails=True)
             if loc:
-                addr = loc.raw.get("address", {})
-                country = addr.get("country", "France")
-                cp = addr.get("postcode") or extract_postcode(query) or ""
-                city = addr.get("city") or addr.get("town") or addr.get("village") or ""
-                road = addr.get("road") or ""
-                house = addr.get("house_number") or ""
-                suburb = addr.get("suburb") or ""
+                ad = loc.raw.get("address",{})
+                country = ad.get("country") or "France"
+                cp = ad.get("postcode") or extract_cp(q)
+                city = ad.get("city") or ad.get("town") or ad.get("village") or ""
+                road = ad.get("road") or ""; house = ad.get("house_number") or ""; suburb = ad.get("suburb") or ""
                 parts = [p for p in [house, road, suburb, city] if p]
-                adresse_propre = ", ".join(parts)
-                if cp and cp not in adresse_propre:
-                    adresse_propre = f"{adresse_propre}, {cp}" if adresse_propre else cp
-                return (loc.latitude, loc.longitude, country, cp, adresse_propre)
+                adr = ", ".join(parts)
+                if cp and cp not in adr: adr = f"{adr}, {cp}" if adr else cp
+                return (float(loc.latitude), float(loc.longitude), country, cp, adr)
         except Exception:
             continue
     return None
 
-# =========================================================
-# LECTURE CSV
-# =========================================================
-def read_csv_smart(file_like):
-    try:
-        return pd.read_csv(file_like, sep=None, engine="python")
+# ====== READ CSV + FLEX MAPPING ======
+def read_csv(file_like):
+    try: return pd.read_csv(file_like, sep=None, engine="python")
     except Exception:
-        file_like.seek(0)
-        return pd.read_csv(file_like, sep=";", engine="python")
+        file_like.seek(0); return pd.read_csv(file_like, sep=";", engine="python")
 
-def build_base_df(csv_bytes):
-    df = read_csv_smart(csv_bytes)
-    out = pd.DataFrame()
-    out["Raison sociale"] = df.get("Raison sociale", "")
-    out["Référent MOA"] = df.get("Référent MOA", "")
-    out["Contact MOA"] = df.get("Contact MOA", "")
-    out["Catégorie-ID"] = df.get("Catégorie-ID", "")
-    out["Adresse-du-siège"] = df.get("Adresse-du-siège", "")
-    for col in df.columns:
-        if col.startswith("implant-indus-"):
-            out[col] = df[col]
-    return out
+def map_columns(df:pd.DataFrame):
+    nm = {_norm(c):c for c in df.columns}
+    pick = lambda keys: next((nm[k] for k in keys if k in nm), None)
+    col = {}
+    col["raison"]   = pick(["raisonsociale","raison","rs","entreprise","societe","société","nom"])
+    col["referent"] = pick(["referentmoa","referent","référentmoa","référent","contactmoa"])
+    col["contact"]  = pick(["emailmoa","contactmoa","email","courriel"])
+    col["catid"]    = pick(["categorieid","categorie-id","catégorie-id","categorie","catégories","categories"])
+    col["siege"]    = pick(["adressedusiege","adresse-du-siege","adresse_du_siege","siege","siège"])
+    # implants (case/accents/espaces robustes)
+    implants = []
+    for c in df.columns:
+        if _norm(c).startswith("implantindus"):
+            implants.append(c)
+    implants = sorted(implants, key=lambda x: _norm(x))  # ordre stable
+    return col, implants
 
-# =========================================================
-# CHOIX DU SITE
-# =========================================================
-def pick_closest_site(row, base_coords: tuple[float, float] | None):
-    """
-    - cherche parmi implant-indus-2 → 5 l’adresse la plus proche du projet
-    - si toutes sont vides → prend 'Adresse-du-siège'
-    - si non géocodable → garde quand même le texte original
-    """
-    cols_implant = ["implant-indus-2", "implant-indus-3", "implant-indus-4", "implant-indus-5"]
-    implants_values = [str(row.get(col, "")).strip() for col in cols_implant if str(row.get(col, "")).strip()]
+# ====== PICK SITE (multi-implant + fallback siège uniquement si tout vide) ======
+def pick_site(row, base_coords):
+    addr_sources = [str(row.get(c,"")).strip() for c in row.index if _norm(c).startswith("implantindus")]
+    addr_sources = [a for a in addr_sources if a]
     best = None
-    adresse_source = None
+    chosen_original = None
 
-    # s’il y a au moins une implantation renseignée
-    for addr_field in implants_values:
-        adresse_source = addr_field
-        g = geocode(addr_field)
-        if not g:
-            continue
-        lat, lon, country, cp, addr_clean = g
-        country = country or "France"
-        if cp:
-            g_cp = geocode(cp + ", France")
-            if g_cp:
-                lat, lon, country, _, _ = g_cp
-        d = distance_km(base_coords, (lat, lon)) if base_coords and lat and lon else float("inf")
-        if best is None or d < best[0]:
-            best = (d, addr_clean, (lat, lon), country, cp)
-
-    # cas : aucune implantation remplie
-    if not implants_values:
-        adresse_source = str(row.get("Adresse-du-siège", "")).strip()
-        if not adresse_source:
-            return "(aucune adresse fournie)", None, "France", ""
-        g = geocode(adresse_source)
-        if g:
-            lat, lon, country, cp, addr_clean = g
-            country = country or "France"
+    if addr_sources:
+        for src in addr_sources:
+            chosen_original = src
+            g = geocode(src)
+            if not g: 
+                continue
+            lat,lon,country,cp,adr_clean = g
+            # distance toujours basée sur CP (si dispo)
             if cp:
-                g_cp = geocode(cp + ", France")
-                if g_cp:
-                    lat, lon, country, _, _ = g_cp
-            return addr_clean, (lat, lon), country, cp
+                gcp = geocode(cp+", France"); 
+                if gcp: lat,lon,_,_,_ = gcp
+            d = km(base_coords,(lat,lon)) if base_coords and lat and lon else float("inf")
+            if best is None or d < best[0]:
+                best = (d, adr_clean, (lat,lon), (country or "France"), cp)
+        if best:
+            _, adr, coords, country, cp = best
+            return (adr or chosen_original or "(adresse)"), coords, (country or "France"), (cp or extract_cp(adr) or "")
+        # implant(s) renseigné(s) mais 0 géocodable → on affiche le texte d’origine pour diagnostic
+        return (chosen_original or "(adresse non géocodable)"), None, "France", extract_cp(chosen_original or "")
+
+    # aucun implant renseigné → siège si présent
+    siege = str(row.get("Adresse-du-siège","")).strip() or str(row.get("adresse du siège","")).strip()
+    if siege:
+        g = geocode(siege)
+        if g:
+            lat,lon,country,cp,adr_clean = g
+            if cp:
+                gcp = geocode(cp+", France"); 
+                if gcp: lat,lon,_,_,_ = gcp
+            return (adr_clean or siege), (lat,lon), (country or "France"), (cp or extract_cp(adr_clean) or extract_cp(siege) or "")
         else:
-            return adresse_source, None, "France", extract_postcode(adresse_source) or ""
+            # siège non géocodable → on laisse le texte tel quel + tentative d’extraire CP
+            return (siege), None, "France", extract_cp(siege)
+    return ("(aucune adresse fournie)"), None, "France", ""
 
-    # cas : implantations renseignées mais aucune géocodable
-    if implants_values and not best:
-        return adresse_source, None, "France", extract_postcode(adresse_source) or ""
-
-    # cas : implantation géocodable
-    _, addr_clean, coords, country, cp = best
-    country = country or "France"
-    return addr_clean, coords, country, cp
-
-# =========================================================
-# CALCUL COMPLET
-# =========================================================
-def compute_distances_enriched(base_df: pd.DataFrame, base_loc: str):
-    base_data = geocode(base_loc + ("" if "France" in base_loc else ", France"))
-    if not base_data:
+# ====== ENRICH / DISTANCES ======
+def compute_enriched(base_df:pd.DataFrame, base_loc:str):
+    base_g = geocode(base_loc if "france" in base_loc.lower() else base_loc+", France")
+    if not base_g:
         st.warning(f"⚠️ Lieu de référence '{base_loc}' non géocodable.")
-        df2 = base_df.copy()
-        df2["Pays"] = "France"
-        df2["Code postal"] = ""
-        df2["Distance au projet"] = ""
-        return df2, None, {}, False
-
-    base_coords = (base_data[0], base_data[1])
-    rows, coords_dict = [], {}
-    for _, r in base_df.iterrows():
-        name = r.get("Raison sociale", "")
-        kept, coords, country, cp = pick_closest_site(r, base_coords)
+        df = base_df.copy()
+        df["Pays"] = "France"; df["Code postal"] = ""; df["Distance au projet"] = ""
+        return df, None, {}
+    base_coords = (base_g[0], base_g[1])
+    rows = []; coords_dict = {}
+    for _,row in base_df.iterrows():
+        name = str(row.get("Raison sociale","") or "")
+        adr, coords, country, cp = pick_site(row, base_coords)
         if coords:
-            lat, lon = coords
-            dist = distance_km(base_coords, (lat, lon))
-            coords_dict[name] = (lat, lon, country)
+            dist = km(base_coords, coords)
+            coords_dict[name] = (coords[0], coords[1], country)
         else:
             dist = ""
         rows.append({
             "Raison sociale": name,
-            "Pays": country,
-            "Adresse": kept,
-            "Code postal": cp,
+            "Pays": country or "France",
+            "Adresse": adr or "",
+            "Code postal": cp or "",
             "Distance au projet": dist,
-            "Catégorie-ID": r.get("Catégorie-ID", ""),
-            "Référent MOA": r.get("Référent MOA", ""),
-            "Contact MOA": r.get("Contact MOA", "")
+            "Catégorie-ID": str(row.get("Catégorie-ID","") or ""),
+            "Référent MOA": str(row.get("Référent MOA","") or ""),
+            "Contact MOA": str(row.get("Contact MOA","") or "")
         })
-    return pd.DataFrame(rows), base_coords, coords_dict, False
+    return pd.DataFrame(rows), base_coords, coords_dict
 
-# =========================================================
-# EXPORTS
-# =========================================================
-def to_excel_complet(df, template=TEMPLATE_PATH, start=START_ROW):
-    wb = load_workbook(template)
-    ws = wb.worksheets[0]
-    for i, (_, r) in enumerate(df.iterrows(), start=start):
-        ws.cell(i, 1, r.get("Raison sociale", ""))
-        ws.cell(i, 2, r.get("Pays", ""))
-        ws.cell(i, 3, r.get("Adresse", ""))
-        ws.cell(i, 4, r.get("Code postal", ""))
-        ws.cell(i, 5, r.get("Distance au projet", ""))
-        ws.cell(i, 6, r.get("Catégorie-ID", ""))
-        ws.cell(i, 7, r.get("Référent MOA", ""))
-        ws.cell(i, 8, r.get("Contact MOA", ""))
-    b = BytesIO()
-    wb.save(b)
-    b.seek(0)
-    return b
+# ====== EXCEL EXPORT ======
+def to_excel_full(df):
+    wb = load_workbook(TEMPLATE_PATH); ws = wb.worksheets[0]
+    for i,(_,r) in enumerate(df.iterrows(), start=START_ROW):
+        ws.cell(i,1, str(r.get("Raison sociale","") or ""))
+        ws.cell(i,2, str(r.get("Pays","") or "France"))
+        ws.cell(i,3, str(r.get("Adresse","") or ""))
+        ws.cell(i,4, str(r.get("Code postal","") or ""))
+        ws.cell(i,5, r.get("Distance au projet","") if r.get("Distance au projet","")!="" else "")
+        ws.cell(i,6, str(r.get("Catégorie-ID","") or ""))
+        ws.cell(i,7, str(r.get("Référent MOA","") or ""))
+        ws.cell(i,8, str(r.get("Contact MOA","") or ""))
+    bio = BytesIO(); wb.save(bio); bio.seek(0); return bio
 
-def to_simple_contact(df_like: pd.DataFrame):
-    b = BytesIO()
-    df = df_like[["Raison sociale", "Référent MOA", "Contact MOA", "Catégorie-ID"]]
-    df.to_excel(b, index=False)
-    b.seek(0)
-    return b
+def to_simple_contact(df):
+    bio = BytesIO()
+    df[["Raison sociale","Référent MOA","Contact MOA","Catégorie-ID"]].to_excel(bio,index=False)
+    bio.seek(0); return bio
 
-# =========================================================
-# UI
-# =========================================================
-st.title("📍 MOA – v30 : adresses affichées même non géocodées")
+# ====== MAP ======
+def make_map(df, base_coords, coords_dict, base_label):
+    fmap = folium.Map(location=[46.6, 2.5], zoom_start=5, tiles="CartoDB positron", control_scale=True)
+    if base_coords:
+        folium.Marker(base_coords, icon=folium.Icon(color="red", icon="star"),
+                      tooltip="Projet", popup=f"Projet {base_label}").add_to(fmap)
+    for _,r in df.iterrows():
+        name = r.get("Raison sociale","")
+        meta = coords_dict.get(name)
+        if not meta: continue
+        lat,lon,country = meta
+        adr = r.get("Adresse",""); cp = r.get("Code postal","")
+        folium.Marker([lat,lon],
+                      icon=folium.Icon(color="blue", icon="industry"),
+                      tooltip=name,
+                      popup=f"<b>{name}</b><br>{adr}<br>{cp} – {country}").add_to(fmap)
+    return fmap
 
-mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "✈️ Enrichi (vol d’oiseau + carte)"], horizontal=True)
-base_loc = st.text_input("📮 Code postal ou adresse du projet", placeholder="ex : 33210 Langon")
-file = st.file_uploader("📄 Fichier CSV", type=["csv"])
+# ====== UI ======
+st.title("📍 MOA – v31 : adresses visibles + carte + renommage")
+
+mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "🚗 Enrichi (vol d’oiseau + carte)"], horizontal=True)
+base_loc = st.text_input("📮 Code postal ou adresse du projet", "33210 Langon")
+uploaded = st.file_uploader("📄 Fichier CSV", type=["csv"])
 
 if mode == "🧾 Contact simple":
     name_simple = st.text_input("Nom du fichier contact simple", "MOA_contact_simple")
 else:
-    name_full = st.text_input("Nom du fichier complet", "Sourcing_MOA")
+    name_full   = st.text_input("Nom du fichier complet", "Sourcing_MOA")
     name_simple = st.text_input("Nom du fichier contact simple", "MOA_contact_simple")
-    name_map = st.text_input("Nom du fichier carte HTML", "Carte_MOA")
+    name_map    = st.text_input("Nom du fichier carte HTML", "Carte_MOA")
 
-if file and (mode == "🧾 Contact simple" or base_loc):
+if uploaded and (mode=="🧾 Contact simple" or base_loc.strip()):
     try:
         with st.spinner("⏳ Traitement en cours..."):
-            base_df = build_base_df(file)
-            if mode == "🧾 Contact simple":
-                df_contact = base_df[["Raison sociale", "Référent MOA", "Contact MOA", "Catégorie-ID"]].copy()
-                x1 = to_simple_contact(df_contact)
-                st.download_button("⬇️ Télécharger le contact simple", data=x1,
-                                   file_name=f"{name_simple}.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                st.dataframe(df_contact.head(10))
+            raw = read_csv(uploaded)
+            colmap, implants = map_columns(raw)
+            # Construire DataFrame de base avec colonnes standardisées
+            base = pd.DataFrame()
+            base["Raison sociale"] = raw.get(colmap["raison"], "")
+            base["Référent MOA"]   = raw.get(colmap["referent"], "")
+            base["Contact MOA"]    = raw.get(colmap["contact"], "")
+            base["Catégorie-ID"]   = raw.get(colmap["catid"], "")
+            base["Adresse-du-siège"]= raw.get(colmap["siege"], "")
+            # rajoute implants tels que détectés
+            for c in implants: base[c] = raw[c]
+
+            if mode=="🧾 Contact simple":
+                x1 = to_simple_contact(base)
+                st.download_button("⬇️ Télécharger le contact simple", x1, f"{name_simple}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.dataframe(base[["Raison sociale","Référent MOA","Contact MOA","Catégorie-ID"]].head(15))
             else:
-                df_full, base_coords, coords_dict, _ = compute_distances_enriched(base_df, base_loc)
-                x2 = to_excel_complet(df_full)
-                st.download_button("⬇️ Télécharger le fichier complet", data=x2,
-                                   file_name=f"{name_full}.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                df_contact = df_full[["Raison sociale", "Référent MOA", "Contact MOA", "Catégorie-ID"]].copy()
-                x1 = to_simple_contact(df_contact)
-                st.download_button("⬇️ Télécharger le contact simple", data=x1,
-                                   file_name=f"{name_simple}.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                st.dataframe(df_full.head(15))
+                df_full, base_coords, coords_dict = compute_enriched(base, base_loc)
+                # fichiers
+                x2 = to_excel_full(df_full)
+                st.download_button("⬇️ Télécharger le fichier complet", x2, f"{name_full}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                x1 = to_simple_contact(df_full)
+                st.download_button("⬇️ Télécharger le contact simple", x1, f"{name_simple}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                # carte
+                fmap = make_map(df_full, base_coords, coords_dict, base_loc)
+                htmlb = BytesIO(fmap.get_root().render().encode("utf-8"))
+                st.download_button("📥 Télécharger la carte (HTML)", htmlb, f"{name_map}.html", mime="text/html")
+                st_html(htmlb.getvalue().decode("utf-8"), height=520)
+
+                st.subheader("Aperçu")
+                st.dataframe(df_full.head(20))
     except Exception as e:
         import traceback
-        st.error(f"💥 Erreur inattendue : {type(e).__name__} – {str(e)}")
-        st.text_area("🔍 Détail complet :", traceback.format_exc(), height=400)
+        st.error(f"💥 Erreur : {type(e).__name__} – {e}")
+        st.text_area("Traceback", traceback.format_exc(), height=300)
 
