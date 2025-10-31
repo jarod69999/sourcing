@@ -34,6 +34,29 @@ st.markdown(f"""
  .stDownloadButton > button{{background:{PRIMARY};color:#fff;border-radius:8px;border:0;}}
 </style>
 """, unsafe_allow_html=True)
+import requests
+
+# === test direct du géocodeur ORS ===
+if ORS_KEY:
+    try:
+        query_test = "33210 Langon, France"
+        url = "https://api.openrouteservice.org/geocode/search"
+        params = {"api_key": ORS_KEY, "text": query_test, "boundary.country": "FR", "size": 1}
+        r = requests.get(url, params=params, timeout=15)
+        if r.status_code == 200:
+            js = r.json()
+            if js.get("features"):
+                coords = js["features"][0]["geometry"]["coordinates"]
+                st.success(f"✅ Géocodage OK : {query_test} → lat {coords[1]:.4f}, lon {coords[0]:.4f}")
+            else:
+                st.error("❌ Aucune coordonnée renvoyée par ORS.")
+        else:
+            st.error(f"❌ Erreur ORS (status {r.status_code}) : {r.text[:200]}")
+    except Exception as e:
+        st.error(f"💥 Exception test géocode : {e}")
+else:
+    st.warning("⚠️ Aucune clé ORS détectée pour le test.")
+
 
 # =========================================================
 # REGEX / UTILS
