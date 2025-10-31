@@ -1,4 +1,4 @@
-# app_moa_distance_map_full_v26.py
+# app_moa_distance_map_full_v28.py
 import streamlit as st
 import pandas as pd
 import re, time, unicodedata
@@ -53,16 +53,11 @@ def _first_email(text: str) -> str | None:
 # =========================================================
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    """
-    Géocodage Nominatim propre :
-    - détecte CP même si au début ou absent
-    - construit une adresse courte sans CP/France doublé
-    - renvoie (lat, lon, country, cp, adresse_propre)
-    """
+    """Géocodage Nominatim complet et propre"""
     if not isinstance(query, str) or not query.strip():
         return None
 
-    geolocator = Nominatim(user_agent="moa_geo_v26")
+    geolocator = Nominatim(user_agent="moa_geo_v28")
     query = query.strip()
     tries = [query]
     if "france" not in query.lower():
@@ -75,9 +70,7 @@ def geocode(query: str):
             if loc:
                 addr = loc.raw.get("address", {})
                 country = addr.get("country", "France")
-                cp = addr.get("postcode")
-                if not cp:
-                    cp = extract_postcode(query) or ""
+                cp = addr.get("postcode") or extract_postcode(query) or ""
                 city = addr.get("city") or addr.get("town") or addr.get("village") or ""
                 road = addr.get("road") or ""
                 house = addr.get("house_number") or ""
@@ -90,16 +83,6 @@ def geocode(query: str):
         except Exception:
             continue
     return None
- 
-# === test du géocodeur ===
-if st.button("🧭 Tester Nominatim (adresse exemple)"):
-    from geopy.geocoders import Nominatim
-    geolocator = Nominatim(user_agent="test_moa")
-    loc = geolocator.geocode("Balbigny, France", addressdetails=True)
-    if loc:
-        st.success(f"✅ Géocode OK : {loc.address}")
-    else:
-        st.error("❌ Géocodeur ne répond rien.")
 
 # =========================================================
 # DISTANCE À VOL D’OISEAU
@@ -120,9 +103,9 @@ def find_columns(cols):
                 cmap[label] = norm_map[k]
     pick(["raisonsociale", "raison", "rs"], "raison")
     pick(["referentmoa", "referent", "refmoa"], "referent")
-    pick(["adresse", "address", "adressepostale"], "adresse")
     pick(["categorieid", "categorie-id", "catégorie-id", "categoryid", "category-id"], "categorie_id")
     pick(["contacts", "contact"], "contacts")
+    pick(["adressedusiege", "adresse-du-siege", "siege"], "adresse_siege")
     for c in cols:
         cl = c.lower()
         if "email" in cl and ("référent" in cl or "referent" in cl):
@@ -172,26 +155,34 @@ def build_base_df(csv_bytes):
     out["Raison sociale"] = df[cm["raison"]] if "raison" in cm else ""
     out["Référent MOA"] = df[cm["referent"]] if "referent" in cm else ""
     out["Catégorie-ID"] = df[cm["categorie_id"]] if "categorie_id" in cm else ""
-    out["Adresse"] = df[cm["adresse"]] if "adresse" in cm else ""
+    out["Adresse-du-siège"] = df[cm["adresse_siege"]] if "adresse_siege" in cm else ""
     out["Contact MOA"] = df.apply(lambda r: derive_contact(r, cm), axis=1)
+    # garde aussi les colonnes implantations
+    for col in df.columns:
+        if col.startswith("implant-indus-"):
+            out[col] = df[col]
     return out
 
 # =========================================================
 # CHOIX DU SITE + DISTANCE
 # =========================================================
-def pick_closest_site(addr_field: str, base_coords: tuple[float, float] | None):
-    if not isinstance(addr_field, str) or not addr_field.strip():
-        return "(adresse non précisée)", None, "France", ""
-    candidates = [a.strip() for a in addr_field.split(",") if a.strip()]
-    if not candidates:
-        candidates = [addr_field.strip()]
+def pick_closest_site(row, base_coords: tuple[float, float] | None):
+    """
+    - cherche parmi implant-indus-2 → 5 l’adresse la plus proche du projet
+    - si toutes sont vides → prend 'Adresse-du-siège'
+    - si non vides mais toutes non géocodables → laisse vide
+    """
+    cols_implant = ["implant-indus-2", "implant-indus-3", "implant-indus-4", "implant-indus-5"]
+    implants_values = [str(row.get(col, "")).strip() for col in cols_implant if str(row.get(col, "")).strip()]
     best = None
-    for c in candidates:
-        g = geocode(c)
+
+    # s’il y a au moins une implantation renseignée → on tente de les géocoder
+    for addr_field in implants_values:
+        g = geocode(addr_field)
         if not g:
             continue
         lat, lon, country, cp, addr_clean = g
-        # on recalcule la distance sur le CP pour homogénéiser
+        # recalcul à partir du CP pour homogénéiser la distance
         if cp:
             g_cp = geocode(cp + ", France")
             if g_cp:
@@ -202,10 +193,28 @@ def pick_closest_site(addr_field: str, base_coords: tuple[float, float] | None):
             d = float("inf")
         if best is None or d < best[0]:
             best = (d, addr_clean, (lat, lon), country, cp)
-    if best:
-        _, addr_clean, coords, country, cp = best
-        return addr_clean, coords, country, cp
-    return "(adresse non précisée)", None, "France", ""
+
+    # --- cas 1 : il y avait des implantations renseignées mais aucune géocodable
+    if implants_values and not best:
+        return "(adresse non géocodable)", None, "France", ""
+
+    # --- cas 2 : aucune implantation renseignée → on prend l'adresse du siège
+    if not implants_values:
+        addr_field = str(row.get("Adresse-du-siège", "")).strip()
+        if addr_field:
+            g = geocode(addr_field)
+            if g:
+                lat, lon, country, cp, addr_clean = g
+                if cp:
+                    g_cp = geocode(cp + ", France")
+                    if g_cp:
+                        lat, lon, country, _, _ = g_cp
+                return addr_clean, (lat, lon), country, cp
+        return "(adresse non précisée)", None, "France", ""
+
+    # --- cas 3 : on a trouvé une implantation géocodable
+    _, addr_clean, coords, country, cp = best
+    return addr_clean, coords, country, cp
 
 def compute_distances_enriched(base_df: pd.DataFrame, base_loc: str):
     base_q = (base_loc or "").strip()
@@ -214,15 +223,14 @@ def compute_distances_enriched(base_df: pd.DataFrame, base_loc: str):
         st.warning(f"⚠️ Lieu de référence '{base_loc}' non géocodable.")
         df2 = base_df.copy()
         df2["Pays"] = "France"
-        df2["Code postal"] = df2["Adresse"].apply(lambda a: extract_postcode(str(a) or "") or "")
+        df2["Code postal"] = ""
         df2["Distance au projet"] = ""
         return df2, None, {}, False
     base_coords = (base_data[0], base_data[1])
     rows, coords_dict = [], {}
     for _, r in base_df.iterrows():
         name = r.get("Raison sociale", "")
-        addr = r.get("Adresse", "") or "(adresse non précisée)"
-        kept, coords, country, cp = pick_closest_site(addr, base_coords)
+        kept, coords, country, cp = pick_closest_site(r, base_coords)
         if coords:
             lat, lon = coords
             dist = distance_km(base_coords, (lat, lon))
@@ -300,7 +308,7 @@ def make_map(df, base_coords, coords_dict, base_label):
 # =========================================================
 # UI
 # =========================================================
-st.title("📍 MOA – v26 : adresses propres, CP distinct et distance par CP")
+st.title("📍 MOA – v28 : multi-implantations + fallback siège (si vide uniquement)")
 
 mode = st.radio("Choisir le mode :", ["🧾 Contact simple", "✈️ Enrichi (vol d’oiseau + carte)"], horizontal=True)
 base_loc = st.text_input("📮 Code postal ou adresse du projet", placeholder="ex : 33210 ou '17 Boulevard Allende, 33210 Langon'")
