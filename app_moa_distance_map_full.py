@@ -309,6 +309,7 @@ def process_csv_to_df(csv_bytes):
     - conserve les colonnes essentielles (raison, catégorie, adresse, référent)
     - calcule le Contact MOA selon la logique élargie (v12-style)
     - garde les colonnes d'implantations industrielles et du siège pour la sélection des sites
+    - crée toujours une colonne 'Adresse' même si elle n’existe pas dans le CSV
     """
     try:
         df = pd.read_csv(csv_bytes, sep=None, engine="python")
@@ -325,18 +326,33 @@ def process_csv_to_df(csv_bytes):
         df[colmap.get("raison", "")].astype(str).fillna("")
         if colmap.get("raison") else df.get("Raison sociale", "")
     )
+
     out["Référent MOA"] = (
         df[colmap.get("referent", "")].astype(str).fillna("")
         if colmap.get("referent") else df.get("Référent MOA", "")
     )
+
     out["Catégories"] = (
         df[colmap.get("categorie", "")].astype(str).fillna("")
         if colmap.get("categorie") else df.get("Catégories", "")
     )
-    out["Adresse"] = (
-        df[colmap.get("adresse", "")].astype(str).fillna("")
-        if colmap.get("adresse") else df.get("Adresse", "")
-    )
+
+    # --- Adresse principale : crée toujours la colonne ---
+    if colmap.get("adresse"):
+        out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("")
+    elif "Adresse" in df.columns:
+        out["Adresse"] = df["Adresse"].astype(str).fillna("")
+    elif "Adresse-du-siège" in df.columns:
+        out["Adresse"] = df["Adresse-du-siège"].astype(str).fillna("")
+    elif "adresse-du-siège" in df.columns:
+        out["Adresse"] = df["adresse-du-siège"].astype(str).fillna("")
+    else:
+        # dernier recours : première adresse industrielle trouvée
+        possible_cols = [c for c in df.columns if "implant" in c.lower()]
+        if possible_cols:
+            out["Adresse"] = df[possible_cols[0]].astype(str).fillna("")
+        else:
+            out["Adresse"] = ""
 
     # --- Contact MOA (calcul automatique) ---
     out["Contact MOA"] = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
