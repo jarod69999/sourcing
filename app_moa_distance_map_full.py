@@ -302,28 +302,56 @@ def choose_contact_moa(row, colmap):
             return em
 
     return ""
-
+ 
 def process_csv_to_df(csv_bytes):
-    """Lit le CSV et construit le DF de base avec Contact MOA déjà calculé (v12-style+)."""
+    """
+    Lit le CSV et construit le DataFrame de base :
+    - conserve les colonnes essentielles (raison, catégorie, adresse, référent)
+    - calcule le Contact MOA selon la logique élargie (v12-style)
+    - garde les colonnes d'implantations industrielles et du siège pour la sélection des sites
+    """
     try:
         df = pd.read_csv(csv_bytes, sep=None, engine="python")
     except Exception:
         df = pd.read_csv(csv_bytes, sep=";", engine="python")
+
+    # Détection des colonnes importantes
     colmap = _find_columns(df.columns)
 
     out = pd.DataFrame()
-    out["Raison sociale"] = (df[colmap.get("raison","")].astype(str).fillna("")
-                             if colmap.get("raison") else df.get("Raison sociale", ""))
-    out["Référent MOA"]   = (df[colmap.get("referent","")].astype(str).fillna("")
-                             if colmap.get("referent") else df.get("Référent MOA", ""))
-    out["Catégories"]     = (df[colmap.get("categorie","")].astype(str).fillna("")
-                             if colmap.get("categorie") else df.get("Catégories", ""))
-    out["Adresse"]        = (df[colmap.get("adresse","")].astype(str).fillna("")
-                             if colmap.get("adresse") else df.get("Adresse", ""))
 
-    # Contact MOA (e-mail) avec la logique élargie
-    out["Contact MOA"]    = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
+    # --- Colonnes principales ---
+    out["Raison sociale"] = (
+        df[colmap.get("raison", "")].astype(str).fillna("")
+        if colmap.get("raison") else df.get("Raison sociale", "")
+    )
+    out["Référent MOA"] = (
+        df[colmap.get("referent", "")].astype(str).fillna("")
+        if colmap.get("referent") else df.get("Référent MOA", "")
+    )
+    out["Catégories"] = (
+        df[colmap.get("categorie", "")].astype(str).fillna("")
+        if colmap.get("categorie") else df.get("Catégories", "")
+    )
+    out["Adresse"] = (
+        df[colmap.get("adresse", "")].astype(str).fillna("")
+        if colmap.get("adresse") else df.get("Adresse", "")
+    )
+
+    # --- Contact MOA (calcul automatique) ---
+    out["Contact MOA"] = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
+
+    # --- Colonnes supplémentaires : implantations industrielles et siège ---
+    extra_cols = []
+    for c in df.columns:
+        cl = str(c).lower()
+        if ("implant" in cl and "indus" in cl) or ("siège" in cl) or ("siege" in cl):
+            extra_cols.append(c)
+    for c in extra_cols:
+        out[c] = df[c].astype(str).fillna("")
+
     return out
+
 
 # ============== MULTI-SITES AVEC PRIORITÉ INDUS =============
 def _split_multi_addresses(addr_field: str):
