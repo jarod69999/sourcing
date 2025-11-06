@@ -39,7 +39,49 @@ HQ_TOKEN     = "adresse-du-siège"
 
 import requests
 # ================== VERIFICATION CLE ORS ==================
+import toml
 import os
+
+def load_ors_key_manual():
+    """Charge la clé ORS depuis .streamlit/secrets.toml si Streamlit ne la détecte pas."""
+    # priorité : Streamlit secrets
+    try:
+        return st.secrets["api"]["ORS_KEY"]
+    except Exception:
+        pass
+
+    # fallback : lecture manuelle du fichier
+    try:
+        path_local = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
+        if os.path.exists(path_local):
+            data = toml.load(path_local)
+            ors_key = data.get("api", {}).get("ORS_KEY", "")
+            if ors_key:
+                print("✅ Clé ORS chargée manuellement depuis .streamlit/secrets.toml")
+                return ors_key
+    except Exception as e:
+        print(f"⚠️ Impossible de charger la clé ORS : {e}")
+
+    # dernier recours : variable d'environnement
+    return os.getenv("ORS_KEY", "")
+
+ORS_KEY = load_ors_key_manual()
+
+if ORS_KEY:
+    st.markdown(
+        f"<div style='background:#e6ffe6;padding:8px;border-radius:6px;border-left:6px solid #2ecc71;'>"
+        f"✅ <b>Clé ORS chargée</b> – début : <code>{ORS_KEY[:6]}...</code></div>",
+        unsafe_allow_html=True,
+    )
+else:
+    st.markdown(
+        "<div style='background:#fff0f0;padding:8px;border-radius:6px;border-left:6px solid #e74c3c;'>"
+        "⚠️ <b>Aucune clé ORS détectée</b> – distances à vol d’oiseau uniquement.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+
 
 def check_ors_key():
     """Vérifie la présence et l'origine de la clé ORS, et affiche un indicateur."""
