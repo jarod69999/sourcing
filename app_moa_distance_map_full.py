@@ -38,27 +38,43 @@ INDUS_TOKENS = ["implant-indus-2","implant-indus-3","implant-indus-4","implant-i
 HQ_TOKEN     = "adresse-du-siège"
 
 import requests
-ORS_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjVlMDYzYWQzMDEzZjQ5ZGJiODE5NThhYTBiZjNjY2FlIiwiaCI6Im11cm11cjY0In0="
+# ================== VERIFICATION CLE ORS ==================
+import os
 
-coords = {"coordinates": [[2.3522, 48.8566], [4.8357, 45.7640]]}  # Paris → Lyon
-r = requests.post(
-    "https://api.openrouteservice.org/v2/directions/driving-car",
-    json=coords,
-    headers={"Authorization": ORS_KEY, "Content-Type": "application/json"},
-)
-print(r.status_code, r.text[:200])
+def check_ors_key():
+    """Vérifie la présence et l'origine de la clé ORS, et affiche un indicateur."""
+    try:
+        ors_key = st.secrets["api"]["ORS_KEY"]
+        st.markdown(
+            f"<div style='background:#e6ffe6;padding:8px;border-radius:6px;"
+            f"border-left:6px solid #2ecc71;'>"
+            f"✅ <b>Clé ORS détectée</b> (depuis <code>secrets.toml</code>) – début : "
+            f"<code>{ors_key[:6]}...</code></div>",
+            unsafe_allow_html=True,
+        )
+        return ors_key
+    except Exception:
+        ors_key = os.getenv("ORS_KEY", "")
+        if ors_key:
+            st.markdown(
+                f"<div style='background:#e6ffe6;padding:8px;border-radius:6px;"
+                f"border-left:6px solid #2ecc71;'>"
+                f"✅ <b>Clé ORS détectée</b> (variable d'environnement) – début : "
+                f"<code>{ors_key[:6]}...</code></div>",
+                unsafe_allow_html=True,
+            )
+            return ors_key
+        else:
+            st.markdown(
+                "<div style='background:#fff0f0;padding:8px;border-radius:6px;"
+                "border-left:6px solid #e74c3c;'>"
+                "⚠️ <b>Aucune clé ORS détectée</b> – distances à vol d’oiseau uniquement.</div>",
+                unsafe_allow_html=True,
+            )
+            return ""
 
-try:
-    ors_key = st.secrets["api"]["ORS_KEY"]
-    st.caption(f"🔑 Clé ORS détectée (depuis secrets.toml) : {ors_key[:6]}... (ok)")
-except Exception:
-    import os
-    ors_key = os.getenv("ORS_KEY", "")
-    if ors_key:
-        st.caption(f"🔑 Clé ORS détectée (via variable d'environnement) : {ors_key[:6]}... (ok)")
-    else:
-        st.warning("⚠️ Aucune clé ORS détectée — distances à vol d’oiseau uniquement.")
-
+# appel automatique au démarrage
+ORS_KEY = check_ors_key()
 
 def ors_distance(coord1, coord2, ors_key=""):
     """
