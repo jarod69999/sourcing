@@ -106,34 +106,7 @@ def extract_cp_city(text: str):
         return (m.group(2), ville)
     return ("","")
 
-@st.cache_data(show_spinner=False)
-def geocode(query: str):
-    """Renvoie (lat, lon, pays, code_postal) en nettoyant les codes internes."""
-    if not query or not isinstance(query, str):
-        return None
 
-    query = clean_internal_codes(_fix_postcode_spaces(_norm(query)))
-    geolocator = Nominatim(user_agent="moa_geo_v13_8")
-
-    try:
-        time.sleep(1)  # éviter le throttling
-        loc = geolocator.geocode(query, timeout=15, addressdetails=True)
-        if loc:
-            addr = loc.raw.get("address", {})
-            country = addr.get("country", "")
-            postcode = addr.get("postcode", "")
-
-            # patch : si FR détecté mais CP à 4 chiffres → mauvaise correspondance
-            if (country.lower() == "france" and len(postcode) == 4):
-                cp5 = re.findall(r"\b\d{5}\b", query)
-                if cp5:
-                    postcode = cp5[-1]
-
-            return (loc.latitude, loc.longitude, country, postcode)
-    except Exception as e:
-        print(f"⚠️ geocode error: {e}")
-        return None
-    return None
 
 def clean_street_numbers(addr: str) -> str:
     """
@@ -160,11 +133,49 @@ def clean_internal_codes(addr: str) -> str:
     addr = re.sub(r"\s{2,}", " ", addr).strip(" ,.-")
     return addr
 
+@st.cache_data(show_spinner=False)
+def geocode(query: str):
+    """Renvoie (lat, lon, pays, code_postal) en nettoyant et corrigeant les erreurs typiques."""
+    if not query or not isinstance(query, str):
+        return None
+
+    # Nettoyages préventifs
+    query = clean_street_numbers(clean_internal_codes(_fix_postcode_spaces(_norm(query))))
+    if not has_explicit_country(query):
+        query = f"{query}, France"
+
+    geolocator = Nominatim(user_agent="moa_geo_v13_8")
+
+    try:
+        time.sleep(1)
+        loc = geolocator.geocode(query, timeout=15, addressdetails=True)
+        if loc:
+            addr = loc.raw.get("address", {})
+            country = addr.get("country", "")
+            postcode = addr.get("postcode", "")
+
+            # 🔧 Correction : si Nominatim renvoie un pays incohérent
+            if "france" in query.lower() and country.lower() not in ["france", "république française"]:
+                country = "France"
+
+            # 🔧 Si code postal à 4 chiffres en France → on tente d’en récupérer un à 5
+            if country.lower() == "france" and len(postcode) == 4:
+                cp5 = re.findall(r"\b\d{5}\b", query)
+                if cp5:
+                    postcode = cp5[-1]
+
+            return (loc.latitude, loc.longitude, country, postcode)
+    except Exception as e:
+        print(f"⚠️ geocode error: {e}")
+        return None
+    return None
+
 
 def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "France"):
     """
+    Géocode avec fallback intelligent :
     1️⃣ adresse brute (+ France si pas de pays)
-    2️⃣ CP+Ville
+    2️⃣ CP + Ville
     3️⃣ Ville seule
     4️⃣ CP seul
     5️⃣ re-essai brut
