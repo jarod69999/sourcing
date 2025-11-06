@@ -153,48 +153,37 @@ def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "Franc
         g = geocode(s)
         if g: return g
     return None
-
+ 
 def distance_km(base_coords, coords):
     """
     Calcule la distance entre deux points :
-    1️⃣ Priorité : distance routière (API OpenRouteService)
+    1️⃣ Priorité : distance routière via OSRM (gratuite et sans clé)
     2️⃣ Fallback : distance géodésique (vol d’oiseau)
     Retourne un tuple : (distance_km arrondie, type_utilisé)
     """
     if not coords or not base_coords:
         return None, ""
 
-    # type par défaut
-    dist_type = "Vol d’oiseau"
-
-    # clé directement définie dans ton script (plus fiable que st.secrets)
-    ORS_KEY = "eyJvcmciOiI1YjNjZT1IOTc4NTEwMT..."  # ← remplace par ta clé réelle
-
-    # 1️⃣ Tentative via l’API ORS
-    if ORS_KEY:
-        try:
-            import requests
-            url = "https://api.openrouteservice.org/v2/directions/driving-car"
-            headers = {"Authorization": ORS_KEY, "Content-Type": "application/json"}
-            data = {"coordinates": [[base_coords[1], base_coords[0]], [coords[1], coords[0]]]}
-            r = requests.post(url, json=data, headers=headers, timeout=25)
-
-            if r.status_code == 200:
-                js = r.json()
-                d = js["routes"][0]["summary"]["distance"] / 1000.0
-                dist_type = "API ORS"
-                return round(d, 1), dist_type
-
-            else:
-                print(f"⚠️ ORS renvoie un code {r.status_code} : {r.text[:100]}")
-
-        except Exception as e:
-            print(f"⚠️ Erreur ORS : {e}")
-
-    # 2️⃣ Fallback : vol d’oiseau si API absente ou erreur
+    import requests
     from geopy.distance import geodesic
+
+    try:
+        # 🚗 Requête vers OSRM (service public)
+        url = f"http://router.project-osrm.org/route/v1/driving/{base_coords[1]},{base_coords[0]};{coords[1]},{coords[0]}?overview=false"
+        r = requests.get(url, timeout=15)
+        if r.status_code == 200:
+            js = r.json()
+            d = js["routes"][0]["distance"] / 1000.0
+            return round(d, 1), "API OSRM"
+        else:
+            print(f"⚠️ OSRM renvoie un code {r.status_code}")
+    except Exception as e:
+        print(f"⚠️ OSRM échouée : {e}")
+
+    # 🕊️ Fallback vol d’oiseau
     d = geodesic(base_coords, coords).km
-    return round(d, 1), dist_type
+    return round(d, 1), "Vol d’oiseau"
+
 
 
 
