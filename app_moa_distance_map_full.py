@@ -39,6 +39,18 @@ HQ_TOKEN     = "adresse-du-siège"
 
 import requests
 
+try:
+    ors_key = st.secrets["api"]["ORS_KEY"]
+    st.caption(f"🔑 Clé ORS détectée (depuis secrets.toml) : {ors_key[:6]}... (ok)")
+except Exception:
+    import os
+    ors_key = os.getenv("ORS_KEY", "")
+    if ors_key:
+        st.caption(f"🔑 Clé ORS détectée (via variable d'environnement) : {ors_key[:6]}... (ok)")
+    else:
+        st.warning("⚠️ Aucune clé ORS détectée — distances à vol d’oiseau uniquement.")
+
+
 def ors_distance(coord1, coord2, ors_key=""):
     """
     Essaie de calculer la distance routière (driving-car) via OpenRouteService.
