@@ -591,6 +591,7 @@ def map_to_html(fmap):
 
 # ======================== INTERFACE =========================
 st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
+st.image("Conseil-noir.png", width=220)
 
 mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
 base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)",
