@@ -40,7 +40,7 @@ HQ_TOKEN     = "adresse-du-siège"
 import requests
 
 # ================== VERIFICATION CLE ORS ==================
-st.image("Conseil-noir.png", caption="MOA – Hors Site Conseil", use_column_width=False, width=220)
+st.image("Conseil-noir.jpg", caption="MOA – Hors Site Conseil", use_column_width=False, width=220)
 
 
 
@@ -592,7 +592,7 @@ def map_to_html(fmap):
 
 # ======================== INTERFACE =========================
 st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
-st.image("Conseil-noir.png", width=220)
+st.image("Conseil-noir.jpg", width=220)
 
 mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
 base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)",
