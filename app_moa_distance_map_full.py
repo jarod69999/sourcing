@@ -355,49 +355,54 @@ def _split_multi_addresses(addr_field: str):
             out.append(e); seen.add(e)
     return out
 
-def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float,float]):
+def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Règle :
-    1) parmi les segments contenant implant-indus-2/3/4/5 -> garder le PLUS PROCHE
-    2) s'il n'y en a aucun -> garder celui qui contient 'Adresse-du-siège'
-    3) sinon -> garder le premier segment dispo
-
-    Retour: (kept_addr, (lat,lon) or None, country, cp, best_dist_km or None)
+    Sélectionne le site prioritaire selon la règle :
+      1️⃣ Priorité absolue aux implantations industrielles (implant-indus-2 → implant-indus-5)
+      2️⃣ Parmi elles, on garde celle la plus proche du projet
+      3️⃣ Si aucune implantation indus géocodable → fallback sur 'Adresse-du-siège'
+      4️⃣ Si rien de géocodable → on garde l’adresse brute
+    Retourne : (adresse_retenue, (lat,lon), pays, code_postal, distance_km)
     """
-    segments = _split_multi_addresses(addr_field) or [addr_field]
+    import re
+    from geopy.distance import geodesic
 
-    chosen_seg = None
-    chosen_country = ""
-    chosen_cp = ""
-    best_dist = None
-    best_lat = None
-    best_lon = None
+    if row is None:
+        return addr_field, None, "", None, None
 
-    indus_segments = [s for s in segments if any(tok in s.lower() for tok in INDUS_TOKENS)]
-    candidates = indus_segments if indus_segments else segments
-    if not indus_segments:
-        hq = [s for s in segments if HQ_TOKEN in s.lower()]
-        if hq:
-            candidates = hq
+    # 🔍 Cherche toutes les colonnes d’implantations indus et siège
+    indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
+    siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
 
-    for seg in candidates:
-        g = try_geocode_with_fallbacks(seg, "France")
+    indus_addresses = [str(row[c]).strip() for c in indus_cols if str(row[c]).strip()]
+    siege_addresses = [str(row[c]).strip() for c in siege_cols if str(row[c]).strip()]
+
+    best = None
+    # 🏭 Étape 1 : tester toutes les implantations industrielles
+    for addr in indus_addresses:
+        g = try_geocode_with_fallbacks(addr)
         if not g:
             continue
-        lat, lon, country, postcode = g
-        d = distance_km(base_coords, (lat, lon))
-        if (chosen_seg is None) or (d is not None and (best_dist is None or d < best_dist)):
-            chosen_seg = seg
-            best_dist = d
-            best_lat, best_lon = lat, lon
-            chosen_country = country or ("France" if not has_explicit_country(seg) else "")
-            chosen_cp = postcode or extract_cp_fallback(seg)
+        lat, lon, country, cp = g
+        d = geodesic(base_coords, (lat, lon)).km
+        if best is None or d < best[0]:
+            best = (d, addr, (lat, lon), country, cp)
 
-    if chosen_seg is None:
-        raw = segments[0]
-        return raw, None, "", extract_cp_fallback(raw), None
+    # 🏢 Étape 2 : fallback sur le siège si aucune implantation géocodable
+    if not best and siege_addresses:
+        addr = siege_addresses[0]
+        g = try_geocode_with_fallbacks(addr)
+        if g:
+            lat, lon, country, cp = g
+            best = (0, addr, (lat, lon), country, cp)
 
-    return chosen_seg, (best_lat, best_lon), chosen_country, chosen_cp, best_dist  # 5 valeurs
+    if best:
+        d, addr, coords, country, cp = best
+        return addr, coords, country, cp, d
+
+    # 🕳️ Aucun site trouvé
+    return addr_field, None, "", extract_cp_fallback(addr_field), None
+
 
 # =================== DISTANCES & FINALE =====================
 def compute_distances(df, base_address):
