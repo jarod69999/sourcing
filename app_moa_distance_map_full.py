@@ -357,20 +357,18 @@ def _split_multi_addresses(addr_field: str):
 
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Sélectionne le site prioritaire selon la règle :
-      1️⃣ Priorité absolue aux implantations industrielles (implant-indus-2 → implant-indus-5)
-      2️⃣ Parmi elles, on garde celle la plus proche du projet
-      3️⃣ Si aucune implantation indus géocodable → fallback sur 'Adresse-du-siège'
-      4️⃣ Si rien de géocodable → on garde l’adresse brute
+    Sélectionne le site prioritaire d'une entreprise :
+      1️⃣ parmi les colonnes 'implant-indus-2..5', on garde celle la plus proche du projet
+      2️⃣ si aucune implantation indus géocodable, fallback sur 'Adresse-du-siège'
+      3️⃣ sinon, None
     Retourne : (adresse_retenue, (lat,lon), pays, code_postal, distance_km)
     """
-    import re
     from geopy.distance import geodesic
 
     if row is None:
         return addr_field, None, "", None, None
 
-    # 🔍 Cherche toutes les colonnes d’implantations indus et siège
+    # 🔍 Récupère toutes les colonnes d'implantations industrielles et du siège
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
     siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
 
@@ -378,6 +376,7 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
     siege_addresses = [str(row[c]).strip() for c in siege_cols if str(row[c]).strip()]
 
     best = None
+
     # 🏭 Étape 1 : tester toutes les implantations industrielles
     for addr in indus_addresses:
         g = try_geocode_with_fallbacks(addr)
@@ -388,7 +387,7 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
         if best is None or d < best[0]:
             best = (d, addr, (lat, lon), country, cp)
 
-    # 🏢 Étape 2 : fallback sur le siège si aucune implantation géocodable
+    # 🏢 Étape 2 : fallback sur le siège si aucune implantation indus géocodable
     if not best and siege_addresses:
         addr = siege_addresses[0]
         g = try_geocode_with_fallbacks(addr)
@@ -398,10 +397,11 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
     if best:
         d, addr, coords, country, cp = best
-        return addr, coords, country, cp, d
+        return addr, coords, country, (cp or extract_cp_fallback(addr)), d
 
-    # 🕳️ Aucun site trouvé
+    # Aucun site géocodable
     return addr_field, None, "", extract_cp_fallback(addr_field), None
+
 
 
 # =================== DISTANCES & FINALE =====================
@@ -437,8 +437,8 @@ def compute_distances(df, base_address):
         name = str(row.get("Raison sociale", "")).strip()
         adresse = str(row.get("Adresse", ""))
 
-        kept_addr, coords, country, cp, best_dist = pick_site_with_indus_priority(adresse, base_coords)
-
+        kept_addr, coords, country, cp, best_dist = pick_site_with_indus_priority(adresse, base_coords, row)
+ 
         # si pas de coords, tenter CP+Ville pour débloquer la distance
         if not coords:
             cpe, villee = extract_cp_city(kept_addr)
