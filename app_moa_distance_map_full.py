@@ -357,27 +357,26 @@ def _split_multi_addresses(addr_field: str):
 
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Sélectionne le site prioritaire d'une entreprise :
-      1️⃣ parmi les colonnes 'implant-indus-2..5', on garde celle la plus proche du projet
-      2️⃣ si aucune implantation indus géocodable, fallback sur 'Adresse-du-siège'
-      3️⃣ sinon, None
-    Retourne : (adresse_retenue, (lat,lon), pays, code_postal, distance_km)
+    1) parmi les colonnes 'implant-indus-2..5', on garde celle la plus proche du projet
+    2) si aucune implantation indus géocodable -> fallback sur 'Adresse-du-siège'
+    3) sinon -> rien
+    Retour : (adresse_retenue, (lat,lon), pays, code_postal, distance_km)
     """
     from geopy.distance import geodesic
 
     if row is None:
         return addr_field, None, "", None, None
 
-    # 🔍 Récupère toutes les colonnes d'implantations industrielles et du siège
-    indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
-    siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
+    # colonnes indus et siège présentes dans la ligne (merci patch #1)
+    indus_cols = [c for c in row.index if ("implant" in c.lower() and "indus" in c.lower())]
+    siege_cols = [c for c in row.index if ("siège" in c.lower() or "siege" in c.lower())]
 
     indus_addresses = [str(row[c]).strip() for c in indus_cols if str(row[c]).strip()]
     siege_addresses = [str(row[c]).strip() for c in siege_cols if str(row[c]).strip()]
 
     best = None
 
-    # 🏭 Étape 1 : tester toutes les implantations industrielles
+    # 🏭 priorité : toutes les implantations indus -> garder la plus proche
     for addr in indus_addresses:
         g = try_geocode_with_fallbacks(addr)
         if not g:
@@ -387,7 +386,7 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
         if best is None or d < best[0]:
             best = (d, addr, (lat, lon), country, cp)
 
-    # 🏢 Étape 2 : fallback sur le siège si aucune implantation indus géocodable
+    # 🏢 fallback : siège si aucune indus géocodable
     if not best and siege_addresses:
         addr = siege_addresses[0]
         g = try_geocode_with_fallbacks(addr)
@@ -399,7 +398,7 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
         d, addr, coords, country, cp = best
         return addr, coords, country, (cp or extract_cp_fallback(addr)), d
 
-    # Aucun site géocodable
+    # rien de géocodable
     return addr_field, None, "", extract_cp_fallback(addr_field), None
 
 
