@@ -38,6 +38,15 @@ INDUS_TOKENS = ["implant-indus-2","implant-indus-3","implant-indus-4","implant-i
 HQ_TOKEN     = "adresse-du-siège"
 
 import requests
+ORS_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjVlMDYzYWQzMDEzZjQ5ZGJiODE5NThhYTBiZjNjY2FlIiwiaCI6Im11cm11cjY0In0="
+
+coords = {"coordinates": [[2.3522, 48.8566], [4.8357, 45.7640]]}  # Paris → Lyon
+r = requests.post(
+    "https://api.openrouteservice.org/v2/directions/driving-car",
+    json=coords,
+    headers={"Authorization": ORS_KEY, "Content-Type": "application/json"},
+)
+print(r.status_code, r.text[:200])
 
 try:
     ors_key = st.secrets["api"]["ORS_KEY"]
