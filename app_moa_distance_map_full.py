@@ -398,45 +398,55 @@ def _split_multi_addresses(addr_field: str):
         if e not in seen:
             out.append(e); seen.add(e)
     return out
-
+ 
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    1) parmi les colonnes 'implant-indus-2..5', on garde celle la plus proche du projet
-    2) si aucune implantation indus géocodable -> fallback sur 'Adresse-du-siège'
-    3) sinon -> rien
-    Retour : (adresse_retenue, (lat,lon), pays, code_postal, distance_km)
+    1️⃣ Parmi les colonnes 'implant-indus-2..5', on garde la plus proche du projet.
+    2️⃣ Si aucune implantation industrielle géocodable, on prend 'Adresse-du-siège'.
+    3️⃣ Sinon, on retourne la première adresse trouvée.
     """
     from geopy.distance import geodesic
 
     if row is None:
         return addr_field, None, "", None, None
 
-    # colonnes indus et siège présentes dans la ligne (merci patch #1)
+    # 🔍 Récupération des colonnes
     indus_cols = [c for c in row.index if ("implant" in c.lower() and "indus" in c.lower())]
     siege_cols = [c for c in row.index if ("siège" in c.lower() or "siege" in c.lower())]
 
-    indus_addresses = [str(row[c]).strip() for c in indus_cols if str(row[c]).strip()]
-    siege_addresses = [str(row[c]).strip() for c in siege_cols if str(row[c]).strip()]
+    indus_addresses = [str(row[c]).strip() for c in indus_cols if str(row[c]).strip() and str(row[c]).lower() != "nan"]
+    siege_addresses = [str(row[c]).strip() for c in siege_cols if str(row[c]).strip() and str(row[c]).lower() != "nan"]
 
     best = None
 
-    # 🏭 priorité : toutes les implantations indus -> garder la plus proche
+    # 🏭 priorité : toutes les implantations industrielles -> garder la plus proche
     for addr in indus_addresses:
-        g = try_geocode_with_fallbacks(addr)
+        # ajout automatique d'un pays s'il manque
+        addr_norm = addr
+        if not has_explicit_country(addr_norm):
+            if "voderady" in addr_norm.lower():
+                addr_norm += ", Slovaquie"
+            elif "bedizzole" in addr_norm.lower():
+                addr_norm += ", Italie"
+            else:
+                addr_norm += ", France"
+
+        g = try_geocode_with_fallbacks(addr_norm)
         if not g:
             continue
         lat, lon, country, cp = g
         d = geodesic(base_coords, (lat, lon)).km
         if best is None or d < best[0]:
-            best = (d, addr, (lat, lon), country, cp)
+            best = (d, addr_norm, (lat, lon), country, cp)
 
     # 🏢 fallback : siège si aucune indus géocodable
     if not best and siege_addresses:
         addr = siege_addresses[0]
-        g = try_geocode_with_fallbacks(addr)
+        addr_norm = addr if has_explicit_country(addr) else f"{addr}, France"
+        g = try_geocode_with_fallbacks(addr_norm)
         if g:
             lat, lon, country, cp = g
-            best = (0, addr, (lat, lon), country, cp)
+            best = (0, addr_norm, (lat, lon), country, cp)
 
     if best:
         d, addr, coords, country, cp = best
@@ -444,6 +454,7 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
     # rien de géocodable
     return addr_field, None, "", extract_cp_fallback(addr_field), None
+
 
 
 
@@ -579,7 +590,7 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
-st.title("📍 MOA – v13.8 : priorité indus + Contact MOA (email) + bouton carte (sans API)")
+st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
 
 mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
 base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)",
