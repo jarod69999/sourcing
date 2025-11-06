@@ -135,6 +135,17 @@ def geocode(query: str):
         return None
     return None
 
+def clean_street_numbers(addr: str) -> str:
+    """
+    Empêche les numéros de rue au début (ex: '1070 Route de...') d'être confondus avec un code postal.
+    """
+    if not isinstance(addr, str):
+        return addr
+    addr = addr.strip()
+    # Si un nombre à 3–4 chiffres est en début de chaîne, on le remplace par 'N° <nombre>'
+    addr = re.sub(r"^(\d{3,4})(\s+)([A-Za-z])", r"N° \1 \3", addr)
+    return addr
+
 
 def clean_internal_codes(addr: str) -> str:
     """
@@ -158,7 +169,7 @@ def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "Franc
     4️⃣ CP seul
     5️⃣ re-essai brut
     """
-    s = clean_internal_codes(_fix_postcode_spaces(_norm(raw_addr)))
+    s = clean_street_numbers(clean_internal_codes(_fix_postcode_spaces(_norm(raw_addr))))
     explicit_overseas = has_explicit_country(s)
 
     g = geocode(s if explicit_overseas else f"{s}, {assumed_country_hint}")
