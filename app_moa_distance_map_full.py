@@ -39,84 +39,10 @@ HQ_TOKEN     = "adresse-du-siège"
 
 import requests
 # ================== VERIFICATION CLE ORS ==================
-import toml
-import os
 
-def load_ors_key_manual():
-    """Charge la clé ORS depuis .streamlit/secrets.toml si Streamlit ne la détecte pas."""
-    # priorité : Streamlit secrets
-    try:
-        return st.secrets["api"]["ORS_KEY"]
-    except Exception:
-        pass
-
-    # fallback : lecture manuelle du fichier
-    try:
-        path_local = os.path.join(os.path.dirname(__file__), ".streamlit", "secrets.toml")
-        if os.path.exists(path_local):
-            data = toml.load(path_local)
-            ors_key = data.get("api", {}).get("ORS_KEY", "")
-            if ors_key:
-                print("✅ Clé ORS chargée manuellement depuis .streamlit/secrets.toml")
-                return ors_key
-    except Exception as e:
-        print(f"⚠️ Impossible de charger la clé ORS : {e}")
-
-    # dernier recours : variable d'environnement
-    return os.getenv("ORS_KEY", "")
-
-ORS_KEY = load_ors_key_manual()
-
-if ORS_KEY:
-    st.markdown(
-        f"<div style='background:#e6ffe6;padding:8px;border-radius:6px;border-left:6px solid #2ecc71;'>"
-        f"✅ <b>Clé ORS chargée</b> – début : <code>{ORS_KEY[:6]}...</code></div>",
-        unsafe_allow_html=True,
-    )
-else:
-    st.markdown(
-        "<div style='background:#fff0f0;padding:8px;border-radius:6px;border-left:6px solid #e74c3c;'>"
-        "⚠️ <b>Aucune clé ORS détectée</b> – distances à vol d’oiseau uniquement.</div>",
-        unsafe_allow_html=True,
-    )
-
-
-
-
-def check_ors_key():
-    """Vérifie la présence et l'origine de la clé ORS, et affiche un indicateur."""
-    try:
-        ors_key = st.secrets["api"]["ORS_KEY"]
-        st.markdown(
-            f"<div style='background:#e6ffe6;padding:8px;border-radius:6px;"
-            f"border-left:6px solid #2ecc71;'>"
-            f"✅ <b>Clé ORS détectée</b> (depuis <code>secrets.toml</code>) – début : "
-            f"<code>{ors_key[:6]}...</code></div>",
-            unsafe_allow_html=True,
-        )
-        return ors_key
-    except Exception:
-        ors_key = os.getenv("ORS_KEY", "")
-        if ors_key:
-            st.markdown(
-                f"<div style='background:#e6ffe6;padding:8px;border-radius:6px;"
-                f"border-left:6px solid #2ecc71;'>"
-                f"✅ <b>Clé ORS détectée</b> (variable d'environnement) – début : "
-                f"<code>{ors_key[:6]}...</code></div>",
-                unsafe_allow_html=True,
-            )
-            return ors_key
-        else:
-            st.markdown(
-                "<div style='background:#fff0f0;padding:8px;border-radius:6px;"
-                "border-left:6px solid #e74c3c;'>"
-                "⚠️ <b>Aucune clé ORS détectée</b> – distances à vol d’oiseau uniquement.</div>",
-                unsafe_allow_html=True,
-            )
-            return ""
 
 # appel automatique au démarrage
-ORS_KEY = check_ors_key()
+ORS_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjVlMDYzYWQzMDEzZjQ5ZGJiODE5NThhYTBiZjNjY2FlIiwiaCI6Im11cm11cjY0In0="
 
 def ors_distance(coord1, coord2, ors_key=""):
     """
@@ -230,43 +156,46 @@ def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "Franc
 
 def distance_km(base_coords, coords):
     """
-    Essaie d'abord la distance routière (OpenRouteService),
-    sinon revient sur la distance géodésique (vol d’oiseau).
-    Retourne un tuple : (distance_km, type_utilisé)
+    Calcule la distance entre deux points :
+    1️⃣ Priorité : distance routière (API OpenRouteService)
+    2️⃣ Fallback : distance géodésique (vol d’oiseau)
+    Retourne un tuple : (distance_km arrondie, type_utilisé)
     """
     if not coords or not base_coords:
         return None, ""
 
-    ors_type = "Vol d’oiseau"  # valeur par défaut
+    # type par défaut
+    dist_type = "Vol d’oiseau"
 
-    try:
-        # récupère la clé
+    # clé directement définie dans ton script (plus fiable que st.secrets)
+    ORS_KEY = "eyJvcmciOiI1YjNjZT1IOTc4NTEwMT..."  # ← remplace par ta clé réelle
+
+    # 1️⃣ Tentative via l’API ORS
+    if ORS_KEY:
         try:
-            ors_key = st.secrets["api"]["ORS_KEY"]
-        except Exception:
-            import os
-            ors_key = os.getenv("ORS_KEY", "")
-
-        # 1️⃣ tentative avec ORS
-        if ors_key:
             import requests
             url = "https://api.openrouteservice.org/v2/directions/driving-car"
-            headers = {"Authorization": ors_key, "Content-Type": "application/json"}
-            data = {"coordinates": [[base_coords[1], base_coords[0]],
-                                    [coords[1], coords[0]]]}
+            headers = {"Authorization": ORS_KEY, "Content-Type": "application/json"}
+            data = {"coordinates": [[base_coords[1], base_coords[0]], [coords[1], coords[0]]]}
             r = requests.post(url, json=data, headers=headers, timeout=25)
+
             if r.status_code == 200:
                 js = r.json()
                 d = js["routes"][0]["summary"]["distance"] / 1000.0
-                ors_type = "API ORS"
-                return round(d, 1), ors_type
-    except Exception as e:
-        print(f"⚠️ ORS API échouée : {e}")
+                dist_type = "API ORS"
+                return round(d, 1), dist_type
 
-    # 2️⃣ fallback vol d’oiseau
+            else:
+                print(f"⚠️ ORS renvoie un code {r.status_code} : {r.text[:100]}")
+
+        except Exception as e:
+            print(f"⚠️ Erreur ORS : {e}")
+
+    # 2️⃣ Fallback : vol d’oiseau si API absente ou erreur
     from geopy.distance import geodesic
-    d = round(geodesic(base_coords, coords).km, 1)
-    return d, ors_type
+    d = geodesic(base_coords, coords).km
+    return round(d, 1), dist_type
+
 
 
 
