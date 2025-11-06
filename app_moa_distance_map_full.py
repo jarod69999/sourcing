@@ -425,14 +425,15 @@ def compute_distances(df, base_address):
         df2["Pays"] = ""
         df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
         df2["Distance au projet"] = ""
+        df2["Type de distance"] = ""
         return df2, None, {}
 
     base_coords = (base[0], base[1])
 
     chosen_coords, chosen_rows = {}, []
     for _, row in df.iterrows():
-        name = str(row.get("Raison sociale","")).strip()
-        adresse = str(row.get("Adresse",""))
+        name = str(row.get("Raison sociale", "")).strip()
+        adresse = str(row.get("Adresse", ""))
 
         kept_addr, coords, country, cp, best_dist = pick_site_with_indus_priority(adresse, base_coords)
 
@@ -448,12 +449,12 @@ def compute_distances(df, base_address):
                     if not cp:
                         cp = g[3] or cpe
 
-             if coords:
-                dist, dist_type = distance_km(base_coords, coords)
-             else:
-                 dist = round(best_dist) if best_dist is not None else None
-                 dist_type = ""
-
+        # calcul de la distance
+        if coords:
+            dist, dist_type = distance_km(base_coords, coords)
+        else:
+            dist = round(best_dist) if best_dist is not None else None
+            dist_type = ""
 
         chosen_rows.append({
             "Raison sociale": name,
@@ -461,16 +462,18 @@ def compute_distances(df, base_address):
             "Adresse": kept_addr,           # adresse complète conservée (étranger inclus)
             "Code postal": cp or "",
             "Distance au projet": dist,
-            "Catégories": row.get("Catégories",""),
-            "Référent MOA": row.get("Référent MOA",""),
-            "Contact MOA": row.get("Contact MOA",""),  # email résolu, visible
+            "Catégories": row.get("Catégories", ""),
+            "Référent MOA": row.get("Référent MOA", ""),
+            "Contact MOA": row.get("Contact MOA", ""),  # email résolu, visible
             "Type de distance": dist_type,
         })
+
         if coords:
             chosen_coords[name] = (coords[0], coords[1], country or "")
 
     out = pd.DataFrame(chosen_rows)
     return out, base_coords, chosen_coords
+
 
 # ========================= EXCEL ============================
 def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
