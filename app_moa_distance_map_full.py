@@ -108,52 +108,84 @@ def extract_cp_city(text: str):
 
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    """Renvoie (lat, lon, pays, code_postal)."""
+    """Renvoie (lat, lon, pays, code_postal) en nettoyant les codes internes."""
     if not query or not isinstance(query, str):
         return None
-    query = _fix_postcode_spaces(_norm(query))
+
+    query = clean_internal_codes(_fix_postcode_spaces(_norm(query)))
     geolocator = Nominatim(user_agent="moa_geo_v13_8")
+
     try:
-        time.sleep(1)
+        time.sleep(1)  # éviter le throttling
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
         if loc:
             addr = loc.raw.get("address", {})
             country = addr.get("country", "")
             postcode = addr.get("postcode", "")
+
+            # patch : si FR détecté mais CP à 4 chiffres → mauvaise correspondance
+            if (country.lower() == "france" and len(postcode) == 4):
+                cp5 = re.findall(r"\b\d{5}\b", query)
+                if cp5:
+                    postcode = cp5[-1]
+
             return (loc.latitude, loc.longitude, country, postcode)
-    except Exception:
+    except Exception as e:
+        print(f"⚠️ geocode error: {e}")
         return None
     return None
 
+
+def clean_internal_codes(addr: str) -> str:
+    """
+    Supprime les codes internes de type 'CS 50007', 'BP 123', etc. qui trompent Nominatim.
+    """
+    if not isinstance(addr, str):
+        return addr
+    # Supprimer les mentions "CS xxxx" ou "BP xxxx"
+    addr = re.sub(r"\b(CS|BP)\s*\d{3,6}\b", "", addr, flags=re.IGNORECASE)
+    # Supprimer les doubles tirets ou espaces résiduels
+    addr = re.sub(r"[-]{2,}", "-", addr)
+    addr = re.sub(r"\s{2,}", " ", addr).strip(" ,.-")
+    return addr
+
+
 def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "France"):
     """
-    1) adresse brute (+ France si pas de pays)
-    2) CP+Ville
-    3) Ville seule
-    4) CP seul
-    5) re-essai brut
+    1️⃣ adresse brute (+ France si pas de pays)
+    2️⃣ CP+Ville
+    3️⃣ Ville seule
+    4️⃣ CP seul
+    5️⃣ re-essai brut
     """
-    s = _fix_postcode_spaces(_norm(raw_addr))
+    s = clean_internal_codes(_fix_postcode_spaces(_norm(raw_addr)))
     explicit_overseas = has_explicit_country(s)
+
     g = geocode(s if explicit_overseas else f"{s}, {assumed_country_hint}")
-    if g: return g
+    if g:
+        return g
 
     cp, ville = extract_cp_city(s)
     if cp or ville:
         if cp and ville:
             g = geocode(f"{cp} {ville}" + ("" if explicit_overseas else ", France"))
-            if g: return g
+            if g:
+                return g
         if ville:
             g = geocode(ville + ("" if explicit_overseas else ", France"))
-            if g: return g
+            if g:
+                return g
         if cp:
             g = geocode(cp + ("" if explicit_overseas else ", France"))
-            if g: return g
+            if g:
+                return g
 
     if not explicit_overseas:
         g = geocode(s)
-        if g: return g
+        if g:
+            return g
     return None
+
  
 def distance_km(base_coords, coords):
     """
