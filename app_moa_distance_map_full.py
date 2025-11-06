@@ -38,11 +38,12 @@ INDUS_TOKENS = ["implant-indus-2","implant-indus-3","implant-indus-4","implant-i
 HQ_TOKEN     = "adresse-du-siège"
 
 import requests
+
 # ================== VERIFICATION CLE ORS ==================
+st.image("Conseil-noir.png", caption="MOA – Hors Site Conseil", use_column_width=False, width=220)
 
 
-# appel automatique au démarrage
-ORS_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6IjVlMDYzYWQzMDEzZjQ5ZGJiODE5NThhYTBiZjNjY2FlIiwiaCI6Im11cm11cjY0In0="
+
 
 def ors_distance(coord1, coord2, ors_key=""):
     """
