@@ -37,6 +37,30 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 INDUS_TOKENS = ["implant-indus-2","implant-indus-3","implant-indus-4","implant-indus-5"]
 HQ_TOKEN     = "adresse-du-siège"
 
+import requests
+
+def ors_distance(coord1, coord2, ors_key=""):
+    """
+    Essaie de calculer la distance routière (driving-car) via OpenRouteService.
+    Si la requête échoue ou que la clé est absente, renvoie None.
+    """
+    if not coord1 or not coord2 or not ors_key:
+        return None
+    url = "https://api.openrouteservice.org/v2/directions/driving-car"
+    headers = {"Authorization": ors_key, "Content-Type": "application/json"}
+    data = {"coordinates": [[coord1[1], coord1[0]], [coord2[1], coord2[0]]]}
+    try:
+        r = requests.post(url, json=data, headers=headers, timeout=30)
+        if r.status_code == 200:
+            js = r.json()
+            return js["routes"][0]["summary"]["distance"] / 1000.0  # km
+        else:
+            print(f"⚠️ ORS error {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        print(f"⚠️ ORS request failed: {e}")
+    return None
+
+
 def _norm(text: str) -> str:
     if not isinstance(text,str): return ""
     text = unicodedata.normalize("NFKC", text)
@@ -126,9 +150,41 @@ def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "Franc
     return None
 
 def distance_km(base_coords, coords):
+    """
+    Essaie d'abord de calculer la distance routière (OpenRouteService),
+    sinon revient sur la distance géodésique (vol d’oiseau).
+    """
     if not coords or not base_coords:
         return None
-    return round(geodesic(base_coords, coords).km)
+
+    # on essaie d’abord avec OpenRouteService
+    try:
+        # récupère la clé (depuis st.secrets ou variable d’environnement)
+        try:
+            ors_key = st.secrets["api"]["ORS_KEY"]
+        except Exception:
+            import os
+            ors_key = os.getenv("ORS_KEY", "")
+
+        if ors_key:
+            import requests
+            url = "https://api.openrouteservice.org/v2/directions/driving-car"
+            headers = {"Authorization": ors_key, "Content-Type": "application/json"}
+            data = {"coordinates": [[base_coords[1], base_coords[0]],
+                                    [coords[1], coords[0]]]}
+            r = requests.post(url, json=data, headers=headers, timeout=25)
+            if r.status_code == 200:
+                js = r.json()
+                d = js["routes"][0]["summary"]["distance"] / 1000.0
+                return round(d, 1)
+    except Exception as e:
+        print(f"⚠️ ORS API échouée : {e}")
+
+    # fallback : vol d’oiseau
+    from geopy.distance import geodesic
+    return round(geodesic(base_coords, coords).km, 1)
+
+
 
 # ================= COLONNES & CONTACT MOA (v12-style+) ======
 def _find_columns(cols):
