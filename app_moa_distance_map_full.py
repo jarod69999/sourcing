@@ -151,21 +151,24 @@ def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "Franc
 
 def distance_km(base_coords, coords):
     """
-    Essaie d'abord de calculer la distance routière (OpenRouteService),
+    Essaie d'abord la distance routière (OpenRouteService),
     sinon revient sur la distance géodésique (vol d’oiseau).
+    Retourne un tuple : (distance_km, type_utilisé)
     """
     if not coords or not base_coords:
-        return None
+        return None, ""
 
-    # on essaie d’abord avec OpenRouteService
+    ors_type = "Vol d’oiseau"  # valeur par défaut
+
     try:
-        # récupère la clé (depuis st.secrets ou variable d’environnement)
+        # récupère la clé
         try:
             ors_key = st.secrets["api"]["ORS_KEY"]
         except Exception:
             import os
             ors_key = os.getenv("ORS_KEY", "")
 
+        # 1️⃣ tentative avec ORS
         if ors_key:
             import requests
             url = "https://api.openrouteservice.org/v2/directions/driving-car"
@@ -176,13 +179,15 @@ def distance_km(base_coords, coords):
             if r.status_code == 200:
                 js = r.json()
                 d = js["routes"][0]["summary"]["distance"] / 1000.0
-                return round(d, 1)
+                ors_type = "API ORS"
+                return round(d, 1), ors_type
     except Exception as e:
         print(f"⚠️ ORS API échouée : {e}")
 
-    # fallback : vol d’oiseau
+    # 2️⃣ fallback vol d’oiseau
     from geopy.distance import geodesic
-    return round(geodesic(base_coords, coords).km, 1)
+    d = round(geodesic(base_coords, coords).km, 1)
+    return d, ors_type
 
 
 
@@ -443,7 +448,12 @@ def compute_distances(df, base_address):
                     if not cp:
                         cp = g[3] or cpe
 
-        dist = distance_km(base_coords, coords) if coords else (round(best_dist) if best_dist is not None else None)
+             if coords:
+                dist, dist_type = distance_km(base_coords, coords)
+             else:
+                 dist = round(best_dist) if best_dist is not None else None
+                 dist_type = ""
+
 
         chosen_rows.append({
             "Raison sociale": name,
@@ -454,6 +464,7 @@ def compute_distances(df, base_address):
             "Catégories": row.get("Catégories",""),
             "Référent MOA": row.get("Référent MOA",""),
             "Contact MOA": row.get("Contact MOA",""),  # email résolu, visible
+            "Type de distance": dist_type,
         })
         if coords:
             chosen_coords[name] = (coords[0], coords[1], country or "")
@@ -479,6 +490,7 @@ def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
         ws.cell(i,6, r.get("Catégories",""))
         ws.cell(i,7, r.get("Référent MOA",""))
         ws.cell(i,8, r.get("Contact MOA",""))   # e-mail dans Excel
+        ws.cell(i,9, r.get("Type de distance",""))
     bio = BytesIO(); wb.save(bio); bio.seek(0); return bio
 
 def to_simple(df):
