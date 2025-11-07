@@ -622,7 +622,7 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
 # =================== DISTANCES & FINALE =====================
 def compute_distances(df, base_address):
-    """Adresse du projet (CP+ville ou complète). Respect pays si présent."""
+    """Adresse du projet (CP+ville ou complète). Respecte le pays si présent."""
     if not base_address.strip():
         st.warning("⚠️ Aucune adresse de référence fournie.")
         return df, None, {}
@@ -630,15 +630,28 @@ def compute_distances(df, base_address):
     q = _fix_postcode_spaces(_norm(base_address))
     q_base = q if has_explicit_country(q) else f"{q}, France"
     base = geocode(q_base)
-    if not base:
-        cp, ville = extract_cp_city(q)
-        if cp or ville:
-            hint = f"{cp} {ville}".strip()
-            hint = hint if has_explicit_country(q) else f"{hint}, France"
-            base = geocode(hint)
+
+    # 🧭 tentative automatique si uniquement un code postal à 5 chiffres
+    if not base and re.fullmatch(r"\d{5}", q):
+        # dictionnaire rapide pour CP connus (tu peux l’étendre)
+        CP_HINTS = {
+            "69380": "Chessy, Rhône",
+            "33210": "Langon",
+            "29200": "Brest",
+            "44000": "Nantes",
+            "75018": "Paris 18e",
+        }
+        if q in CP_HINTS:
+            hint = f"{CP_HINTS[q]}, France"
+        else:
+            hint = f"{q}, France"
+        base = geocode(hint)
+        if base:
+            st.info(f"ℹ️ CP seul détecté → interprété comme : {hint}")
 
     if not base:
-        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'.")
+        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'.\n"
+                   f"👉 Indique au moins la ville (ex : '69380 Chessy').")
         df2 = df.copy()
         df2["Pays"] = ""
         df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
@@ -646,6 +659,7 @@ def compute_distances(df, base_address):
         df2["Type de distance"] = ""
         return df2, None, {}
 
+    # ✅ si on arrive ici : géocodage OK
     base_coords = (base[0], base[1])
 
     chosen_coords, chosen_rows = {}, []
@@ -655,7 +669,7 @@ def compute_distances(df, base_address):
 
         kept_addr, coords, country, cp, best_dist, source_addr = pick_site_with_indus_priority(adresse, base_coords, row)
 
-        # si pas de coords, tenter CP+Ville pour débloquer la distance
+        # si pas de coords, tentative secours CP+Ville
         if not coords:
             cpe, villee = extract_cp_city(kept_addr)
             if cpe or villee:
@@ -667,7 +681,7 @@ def compute_distances(df, base_address):
                     if not cp:
                         cp = g[3] or cpe
 
-        # calcul de la distance
+        # calcul distance
         if coords:
             dist, dist_type = distance_km(base_coords, coords)
         else:
@@ -677,12 +691,12 @@ def compute_distances(df, base_address):
         chosen_rows.append({
             "Raison sociale": name,
             "Pays": country or "",
-            "Adresse": kept_addr,           # adresse complète conservée (étranger inclus)
+            "Adresse": kept_addr,
             "Code postal": cp or "",
             "Distance au projet": dist,
             "Catégories": row.get("Catégories", ""),
             "Référent MOA": row.get("Référent MOA", ""),
-            "Contact MOA": row.get("Contact MOA", ""),  # email résolu, visible
+            "Contact MOA": row.get("Contact MOA", ""),
             "Type de distance": dist_type,
             "Source adresse": source_addr,
         })
