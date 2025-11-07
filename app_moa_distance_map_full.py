@@ -637,24 +637,36 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
 # =================== DISTANCES & FINALE =====================
 def compute_distances(df, base_address):
-    """Adresse du projet (CP+ville ou complète). Toujours géocodable grâce à fallback local."""
+    """Adresse du projet (CP+ville ou complète). Toujours géocodable, même avec un code postal seul."""
     if not base_address.strip():
         st.warning("⚠️ Aucune adresse de référence fournie.")
         return df, None, {}
 
     q = _fix_postcode_spaces(_norm(base_address))
 
-    # 1️⃣ premier essai direct (comme avant)
-    q_base = q if has_explicit_country(q) else f"{q}, France"
-    base = geocode(q_base)
+    # --- 🧠 nouveau bloc : accepte CP seul directement
+    geolocator = Nominatim(user_agent="moa_geo_v16_unified")
+    base = None
+    if re.fullmatch(r"\d{5}", q):  # simple code postal ex: "33210"
+        try:
+            loc = geolocator.geocode(f"{q}, France", timeout=12)
+            if loc:
+                base = (loc.latitude, loc.longitude, "France", q)
+                st.info(f"📍 Lieu de référence interprété comme : {q}, France")
+        except Exception as e:
+            print(f"⚠️ geocode CP direct échoué: {e}")
 
-    # 2️⃣ Fallback : si rien trouvé → détection automatique
+    # 1️⃣ premier essai complet (ex : "33210 Langon" ou "Brest")
+    if not base:
+        q_base = q if has_explicit_country(q) else f"{q}, France"
+        base = geocode(q_base)
+
+    # 2️⃣ fallback : si rien trouvé → détection automatique par CP/Ville
     if not base:
         cp, ville = extract_cp_city(q)
         if not cp and re.fullmatch(r"\d{5}", q):
             cp = q
 
-        # correspondances locales (fallback fiables)
         CP_HINTS = {
             "33210": "Langon, Gironde",
             "69380": "Chessy, Rhône",
@@ -674,25 +686,25 @@ def compute_distances(df, base_address):
         else:
             base_hint = f"{q}, France"
 
-        # deuxième tentative
         base = geocode(base_hint)
 
-        # 🔁 dernière chance : juste la ville sans CP
+        # 🔁 dernière chance : juste la ville
         if not base and ville:
             base = geocode(f"{ville}, France")
 
         if base:
             st.info(f"ℹ️ Lieu de référence interprété comme : {base_hint}")
 
-    # 3️⃣ si toujours rien → erreur propre
+    # 3️⃣ si toujours rien → erreur propre (sans bloquer)
     if not base:
         st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'. "
-                   f"👉 Ajoute 'France' ou vérifie ton orthographe.")
+                   f"👉 Vérifie simplement le code postal ou ajoute une ville.")
         df2 = df.copy()
         df2["Pays"] = ""
         df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
         df2["Distance au projet"] = ""
         df2["Type de distance"] = ""
+        df2["Fiabilité géocode"] = ""
         return df2, None, {}
 
     # ✅ Base trouvée
@@ -707,7 +719,7 @@ def compute_distances(df, base_address):
             adresse, base_coords, row
         )
 
-        # si pas de coords, tentative secours CP+Ville
+        # tentative secours CP+Ville
         if not coords:
             cpe, villee = extract_cp_city(kept_addr)
             if cpe or villee:
@@ -719,7 +731,7 @@ def compute_distances(df, base_address):
                     if not cp:
                         cp = g[3] or cpe
 
-        # calcul de la distance
+        # calcul de distance
         if coords:
             dist, dist_type = distance_km(base_coords, coords)
         else:
@@ -737,6 +749,7 @@ def compute_distances(df, base_address):
             "Contact MOA": row.get("Contact MOA", ""),
             "Type de distance": dist_type,
             "Source adresse": source_addr,
+            "Fiabilité géocode": source_addr,  # ✅ nouvelle colonne
         })
 
         if coords:
