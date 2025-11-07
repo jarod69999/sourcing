@@ -439,16 +439,42 @@ def _split_multi_addresses(addr_field: str):
  
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    1️⃣ Parmi les colonnes 'implant-indus-2..5', on garde la plus proche du projet.
-    2️⃣ Si aucune implantation industrielle géocodable, on prend 'Adresse-du-siège'.
-    3️⃣ Sinon, on retourne la première adresse trouvée.
+    1️⃣ Priorise les implantations industrielles (2 à 5) sur le siège.
+    2️⃣ Corrige les pays selon les préfixes (B-, L-, NL-, SK-, etc.).
+    3️⃣ Garde l’adresse industrielle la plus proche du projet.
+    4️⃣ Fallback : siège si aucune indus géocodable.
+    Retour : (adresse, coords, pays, code_postal, distance)
     """
     from geopy.distance import geodesic
 
     if row is None:
         return addr_field, None, "", None, None
 
-    # 🔍 Récupération des colonnes
+    def _detect_country(addr: str) -> str:
+        """Déduit le pays à partir du contenu de l'adresse."""
+        s = addr.lower()
+        if any(x in s for x in ["slovaqu", "voderady", "bratislava", "trnava"]):
+            return "Slovaquie"
+        if any(x in s for x in ["belg", "ittre", "alken", "brux", "liège", "brussels"]):
+            return "Belgique"
+        if any(x in s for x in ["luxemb", "bettembourg", "esch-sur-alzette", "l-"]):
+            return "Luxembourg"
+        if any(x in s for x in ["ital", "bedizzole", "brescia", "milano"]):
+            return "Italie"
+        if any(x in s for x in ["pays-bas", "amsterdam", "rotterdam", "nl-"]):
+            return "Pays-Bas"
+        if any(x in s for x in ["espagne", "españa", "madrid", "barcelona"]):
+            return "Espagne"
+        return "France"
+
+    def _normalize_country(addr: str) -> str:
+        """Ajoute le pays si absent."""
+        if not has_explicit_country(addr):
+            detected = _detect_country(addr)
+            return f"{addr}, {detected}"
+        return addr
+
+    # === Récupération des colonnes ===
     indus_cols = [c for c in row.index if ("implant" in c.lower() and "indus" in c.lower())]
     siege_cols = [c for c in row.index if ("siège" in c.lower() or "siege" in c.lower())]
 
@@ -457,42 +483,47 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
     best = None
 
-    # 🏭 priorité : toutes les implantations industrielles -> garder la plus proche
+    # 🏭 Étape 1 : tester toutes les implantations industrielles
     for addr in indus_addresses:
-        # ajout automatique d'un pays s'il manque
-        addr_norm = addr
-        if not has_explicit_country(addr_norm):
-            if "voderady" in addr_norm.lower():
-                addr_norm += ", Slovaquie"
-            elif "bedizzole" in addr_norm.lower():
-                addr_norm += ", Italie"
-            else:
-                addr_norm += ", France"
-
-        g = try_geocode_with_fallbacks(addr_norm)
+        addr_norm = _normalize_country(addr)
+        g = try_geocode_with_fallbacks(addr_norm, _detect_country(addr))
         if not g:
             continue
         lat, lon, country, cp = g
         d = geodesic(base_coords, (lat, lon)).km
-        if best is None or d < best[0]:
+        # Si pays étranger, on garde la distance mais priorité étrangère
+        if best is None or (
+            country.lower() != "france" and best[3].lower() == "france"
+        ) or d < best[0]:
             best = (d, addr_norm, (lat, lon), country, cp)
 
-    # 🏢 fallback : siège si aucune indus géocodable
+    # 🏢 Étape 2 : fallback siège si aucune indus géocodable
     if not best and siege_addresses:
         addr = siege_addresses[0]
-        addr_norm = addr if has_explicit_country(addr) else f"{addr}, France"
+        addr_norm = _normalize_country(addr)
         g = try_geocode_with_fallbacks(addr_norm)
         if g:
             lat, lon, country, cp = g
             best = (0, addr_norm, (lat, lon), country, cp)
 
+    # 🧩 Étape 3 : fallback total
     if best:
         d, addr, coords, country, cp = best
+        # Correction pays par code postal
+        if str(cp).startswith("B-") or (cp and len(cp) == 4 and int(cp) < 2000):
+            country = "Belgique"
+        elif str(cp).startswith("L-"):
+            country = "Luxembourg"
+        elif str(cp).startswith("SK-"):
+            country = "Slovaquie"
+        elif str(cp).startswith("NL-"):
+            country = "Pays-Bas"
+        elif str(cp).startswith("I-") or str(cp).startswith("IT-"):
+            country = "Italie"
+
         return addr, coords, country, (cp or extract_cp_fallback(addr)), d
 
-    # rien de géocodable
     return addr_field, None, "", extract_cp_fallback(addr_field), None
-
 
 
 
