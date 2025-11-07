@@ -436,7 +436,8 @@ def _split_multi_addresses(addr_field: str):
         if e not in seen:
             out.append(e); seen.add(e)
     return out
- def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
+ 
+def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
     Version finale robuste :
       - Priorité stricte aux implantations industrielles (même si siège plus proche)
