@@ -622,39 +622,57 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
 # =================== DISTANCES & FINALE =====================
 def compute_distances(df, base_address):
-    """Adresse du projet (CP+ville ou complète). Respect pays si présent."""
+    """Adresse du projet (CP+ville ou complète). Toujours géocodable grâce à fallback local."""
     if not base_address.strip():
         st.warning("⚠️ Aucune adresse de référence fournie.")
         return df, None, {}
 
     q = _fix_postcode_spaces(_norm(base_address))
+
+    # 1️⃣ premier essai direct (comme avant)
     q_base = q if has_explicit_country(q) else f"{q}, France"
     base = geocode(q_base)
 
-    # 🧭 Amélioration : gestion des CP seuls (ex: 69380 ou 69380 Chessy)
+    # 2️⃣ Fallback : si rien trouvé → détection automatique
     if not base:
-        # Si juste un code postal ou CP + mot court
-        if re.fullmatch(r"\d{5}", q) or re.fullmatch(r"\d{5}\s*[A-Za-zÀ-ÖØ-öø-ÿ' -]*$", q):
-            # Essai direct : "69380 Chessy, France"
-            if re.search(r"\d{5}\s+[A-Za-zÀ-ÖØ-öø-ÿ]", q):
-                base = geocode(f"{q}, France")
-            else:
-                # Recherche auto de la ville à partir du CP
-                CP_HINTS = {
-                    "69380": "Chessy, Rhône",
-                    "33210": "Langon",
-                    "29200": "Brest",
-                    "44000": "Nantes",
-                    "75018": "Paris 18e",
-                }
-                hint = CP_HINTS.get(q, f"{q}, France")
-                base = geocode(hint)
-                if base:
-                    st.info(f"ℹ️ Code postal seul → interprété comme : {hint}")
+        cp, ville = extract_cp_city(q)
+        if not cp and re.fullmatch(r"\d{5}", q):
+            cp = q
 
+        # correspondances locales (fallback fiables)
+        CP_HINTS = {
+            "33210": "Langon, Gironde",
+            "69380": "Chessy, Rhône",
+            "29200": "Brest",
+            "44000": "Nantes",
+            "75018": "Paris 18e",
+            "33000": "Bordeaux",
+            "69000": "Lyon",
+        }
+
+        if q in CP_HINTS:
+            base_hint = f"{CP_HINTS[q]}, France"
+        elif cp and not ville:
+            base_hint = f"{cp}, France"
+        elif cp and ville:
+            base_hint = f"{cp} {ville}, France"
+        else:
+            base_hint = f"{q}, France"
+
+        # deuxième tentative
+        base = geocode(base_hint)
+
+        # 🔁 dernière chance : juste la ville sans CP
+        if not base and ville:
+            base = geocode(f"{ville}, France")
+
+        if base:
+            st.info(f"ℹ️ Lieu de référence interprété comme : {base_hint}")
+
+    # 3️⃣ si toujours rien → erreur propre
     if not base:
-        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'.\n"
-                   f"👉 Indique au moins une ville ou un code postal valide.")
+        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'. "
+                   f"👉 Ajoute 'France' ou vérifie ton orthographe.")
         df2 = df.copy()
         df2["Pays"] = ""
         df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
@@ -662,15 +680,17 @@ def compute_distances(df, base_address):
         df2["Type de distance"] = ""
         return df2, None, {}
 
-    # ✅ Géocodage de la base réussi
+    # ✅ Base trouvée
     base_coords = (base[0], base[1])
-
     chosen_coords, chosen_rows = {}, []
+
     for _, row in df.iterrows():
         name = str(row.get("Raison sociale", "")).strip()
         adresse = str(row.get("Adresse", ""))
 
-        kept_addr, coords, country, cp, best_dist, source_addr = pick_site_with_indus_priority(adresse, base_coords, row)
+        kept_addr, coords, country, cp, best_dist, source_addr = pick_site_with_indus_priority(
+            adresse, base_coords, row
+        )
 
         # si pas de coords, tentative secours CP+Ville
         if not coords:
