@@ -612,8 +612,8 @@ def compute_distances(df, base_address):
         name = str(row.get("Raison sociale", "")).strip()
         adresse = str(row.get("Adresse", ""))
 
-        kept_addr, coords, country, cp, best_dist = pick_site_with_indus_priority(adresse, base_coords, row)
- 
+        kept_addr, coords, country, cp, best_dist, source_addr = pick_site_with_indus_priority(adresse, base_coords, row)
+
         # si pas de coords, tenter CP+Ville pour débloquer la distance
         if not coords:
             cpe, villee = extract_cp_city(kept_addr)
@@ -643,6 +643,7 @@ def compute_distances(df, base_address):
             "Référent MOA": row.get("Référent MOA", ""),
             "Contact MOA": row.get("Contact MOA", ""),  # email résolu, visible
             "Type de distance": dist_type,
+            "Source adresse": source_addr,
         })
 
         if coords:
