@@ -501,28 +501,30 @@ def _split_multi_addresses(addr_field: str):
  
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Version blindée (nov 2025) :
+    VERSION LONGUE ET STABILISÉE (NOV 2025)
     - Priorité stricte aux implantations industrielles
-    - Si plusieurs implants : prend celui le plus proche du projet
-    - Si aucun implant valide : bascule sur le siège
-    - Gère les entreprises à sites connus (EcoCocon, Porcelanosa, etc.)
-    - Corrige les erreurs pays (ex: Chessy Rhône, Pays-Bas, Slovaquie…)
+    - Si plusieurs implantations indus : prend celle la plus proche du projet
+    - Si aucune coordonnée valide : conserve toujours texte + pays
+    - Gère tous les overrides connus (EcoCocon, Porcelanosa, Gramitherm, Litobox, Retrofitt, Takki, Vandersanden…)
+    - Corrige Chessy (69380 Rhône) et évite tout affichage "nan"
+    - Compatible avec la structure de ton code Streamlit actuel
     """
     from geopy.distance import geodesic
     import re
 
+    # --- 1️⃣ garde une sortie par défaut claire
     if row is None:
-        return addr_field, None, "", None, None, "fallback"
+        return addr_field or "", None, "", "", None, "fallback"
 
     name = str(row.get("Raison sociale", "") or "").lower().strip()
 
-    # === 1️⃣ overrides nom → adresses fiables (sites industriels connus)
+    # --- 2️⃣ adresses fixes pour les entreprises connues
     NAME_OVERRIDES = {
         "cci france pays-bas": "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas",
         "litobox": "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique",
-        "ecococon": "Voderady 91942, Slovaquie",  # usine principale
-        "dz-construct": "195, ZAE Wolser F, L-3290 Bettembourg, Luxembourg",
-        "porcelanosa": "Butech Porcelanosa Offsite, Carretera Nacional 340, km 55.8, 12540 Vila-real, Espagne",
+        "ecococon": "Voderady 91942, Slovaquie",
+        "dz-construct": "195 ZAE Wolser F, L-3290 Bettembourg, Luxembourg",
+        "porcelanosa": "Butech Porcelanosa Offsite, Carretera Nacional 340 km 55.8, 12540 Vila-real, Espagne",
         "gramitherm": "Boulevard de l’Europe 87, 5060 Sambreville, Belgique",
         "takki": "Rue du Halage 13, 1460 Ittre, Belgique",
         "easy’go wood": "Rue du Halage 13, 1460 Ittre, Belgique",
@@ -535,82 +537,102 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
             addr_field = v
             break
 
-    # === 2️⃣ helpers
+    # --- 3️⃣ helpers internes
     def _normalize(a: str) -> str:
-        a = str(a or "")
+        a = str(a or "").strip()
         a = re.sub(r"multi[-\s]*sites?", "", a, flags=re.I)
         a = re.sub(r"\(.*?\)", "", a)
         a = re.sub(r"\s{2,}", " ", a).strip(" ,")
         # corrige Chessy Rhône
         if re.search(r"\bchessy\b", a, flags=re.I) and "69380" in a:
-            a = re.sub(r"\bchessy\b", "Chessy, Rhône", a, flags=re.I)
+            a = "69380 Chessy, Rhône, France"
         return a
 
     def _split_multisite(a: str):
+        """découpe les adresses multi-sites"""
         parts = re.split(r"[;/\n]", str(a or ""))
         parts = [p.strip(" ,") for p in parts if len(p.strip()) > 5]
         return parts or [a]
 
     def _geocode_addr(a: str):
+        """géocode robuste, avec fallback pays automatique"""
         g = try_geocode_with_fallbacks(a, "France")
-        if not g:
-            return None
-        lat, lon, country, cp = g
         alow = a.lower()
+        if not g:
+            # détection pays manuelle si géocode échoue
+            country = "France"
+            if "belg" in alow or "b-" in alow: country = "Belgique"
+            elif "lux" in alow or "l-" in alow: country = "Luxembourg"
+            elif "amsterdam" in alow or "nl" in alow: country = "Pays-Bas"
+            elif "slova" in alow or "voderady" in alow: country = "Slovaquie"
+            elif "espagne" in alow or "vila-real" in alow or "castellon" in alow: country = "Espagne"
+            elif "ital" in alow or "brescia" in alow or "bedizzole" in alow: country = "Italie"
+            return (a, None, country, "")
+        lat, lon, country, cp = g
 
-        # détection manuelle de pays (renforcement)
+        # renforce détection pays si CP ou mot clé
         if re.search(r"\b\d{4}[a-z]{2}\b", alow): country = "Pays-Bas"
         elif re.search(r"\bb\d{4}\b", alow): country = "Belgique"
         elif re.search(r"\bl-\d{3,5}\b", alow): country = "Luxembourg"
         elif "voderady" in alow: country = "Slovaquie"
         elif any(k in alow for k in ["ittre","alken","sambreville","machelen","maasmechelen"]): country = "Belgique"
         elif any(k in alow for k in ["vila-real","castellon","espa"]): country = "Espagne"
-        elif "bedizzole" in alow or "brescia" in alow or "ital" in alow: country = "Italie"
+        elif any(k in alow for k in ["bedizzole","brescia","ital"]): country = "Italie"
 
-        return (a, (lat, lon), country, str(cp or ""))
+        return (a, (lat, lon), country or "France", str(cp or ""))
 
-    # === 3️⃣ on cherche tous les sites industriels valides
+    # --- 4️⃣ collecte toutes les adresses industrielles
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
     siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
-
     all_sites = []
+
     for c in indus_cols:
         val = row[c]
         for raw in _split_multisite(val):
-            a = _normalize(raw)
-            gg = _geocode_addr(a)
+            addr = _normalize(raw)
+            gg = _geocode_addr(addr)
             if gg:
                 a2, coords, country, cp = gg
-                dist = geodesic(base_coords, coords).km if base_coords else None
+                dist = geodesic(base_coords, coords).km if (base_coords and coords) else None
                 all_sites.append((a2, coords, country, cp, dist, "implant_indus"))
 
-    # === 4️⃣ si plusieurs implants, garde celui le plus proche du projet
+    # --- 5️⃣ sélection du site industriel le plus proche
     if all_sites:
         all_sites = [s for s in all_sites if s[1] is not None]
         if all_sites:
-            all_sites.sort(key=lambda x: (x[4] if x[4] is not None else 1e9))
-            return all_sites[0]
+            all_sites.sort(key=lambda x: x[4] if x[4] is not None else 1e9)
+            chosen = all_sites[0]
+            # évite tout None
+            return (
+                chosen[0] or "",
+                chosen[1],
+                chosen[2] or "France",
+                chosen[3] or "",
+                chosen[4] if chosen[4] is not None else None,
+                chosen[5],
+            )
 
-    # === 5️⃣ sinon : siège
+    # --- 6️⃣ sinon siège
     for c in siege_cols:
         val = row[c]
         for raw in _split_multisite(val):
-            a = _normalize(raw)
-            gg = _geocode_addr(a)
+            addr = _normalize(raw)
+            gg = _geocode_addr(addr)
             if gg:
                 a2, coords, country, cp = gg
-                dist = geodesic(base_coords, coords).km if base_coords else None
-                return a2, coords, country, cp, dist, "siège"
+                dist = geodesic(base_coords, coords).km if (base_coords and coords) else None
+                return a2 or "", coords, country or "France", cp or "", dist, "siège"
 
-    # === 6️⃣ fallback adresse principale
-    a = _normalize(addr_field)
-    gg = _geocode_addr(a)
+    # --- 7️⃣ sinon fallback adresse principale
+    addr_norm = _normalize(addr_field)
+    gg = _geocode_addr(addr_norm)
     if gg:
         a2, coords, country, cp = gg
-        dist = geodesic(base_coords, coords).km if base_coords else None
-        return a2, coords, country, cp, dist, "fallback"
+        dist = geodesic(base_coords, coords).km if (base_coords and coords) else None
+        return a2 or "", coords, country or "France", cp or "", dist, "fallback"
 
-    return addr_field, None, "", None, None, "fallback"
+    # --- 8️⃣ tout échoue : renvoie au moins du texte
+    return addr_field or "", None, "France", "", None, "fallback"
 
 
 # =================== DISTANCES & FINALE =====================
