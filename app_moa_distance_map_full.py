@@ -501,13 +501,12 @@ def _split_multi_addresses(addr_field: str):
  
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Version consolidée (nov 2025) :
+    Version blindée (nov 2025) :
     - Priorité stricte aux implantations industrielles
-    - Gestion fiable des pays par CP, villes ou noms d'entreprises
-    - Cas particuliers connus (NL, BE, LU, SK, IT, ES)
-    - Garde les comportements stables des anciennes versions (Ossabois, Retrofitt, Gramitherm, Takki…)
-    - Corrige Chessy (69380 Rhône vs 77700 Seine-et-Marne)
-    Retour: (adresse, (lat,lon) or None, pays, code_postal, distance_km or None, source_tag)
+    - Si plusieurs implants : prend celui le plus proche du projet
+    - Si aucun implant valide : bascule sur le siège
+    - Gère les entreprises à sites connus (EcoCocon, Porcelanosa, etc.)
+    - Corrige les erreurs pays (ex: Chessy Rhône, Pays-Bas, Slovaquie…)
     """
     from geopy.distance import geodesic
     import re
@@ -515,42 +514,42 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
     if row is None:
         return addr_field, None, "", None, None, "fallback"
 
-    name = str(row.get("Raison sociale", "") or "").lower()
+    name = str(row.get("Raison sociale", "") or "").lower().strip()
 
-    # ---------- overrides nom → adresse fiable ----------
+    # === 1️⃣ overrides nom → adresses fiables (sites industriels connus)
     NAME_OVERRIDES = {
         "cci france pays-bas": "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas",
         "litobox": "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique",
-        "ecococon": "Voderady 91942, Slovaquie",
+        "ecococon": "Voderady 91942, Slovaquie",  # usine principale
         "dz-construct": "195, ZAE Wolser F, L-3290 Bettembourg, Luxembourg",
-        "porcelanosa": "Butech Porcelanosa Offsite - Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne",
+        "porcelanosa": "Butech Porcelanosa Offsite, Carretera Nacional 340, km 55.8, 12540 Vila-real, Espagne",
         "gramitherm": "Boulevard de l’Europe 87, 5060 Sambreville, Belgique",
         "takki": "Rue du Halage 13, 1460 Ittre, Belgique",
         "easy’go wood": "Rue du Halage 13, 1460 Ittre, Belgique",
         "easy'go wood": "Rue du Halage 13, 1460 Ittre, Belgique",
+        "retrofitt": "Nieuwlandlaan 39/B224, 3200 Aarschot, Belgique",
+        "vandersanden": "Slakweidestraat 41, 3630 Maasmechelen, Belgique",
     }
     for k, v in NAME_OVERRIDES.items():
         if k in name:
             addr_field = v
             break
 
-    # ---------- helpers ----------
+    # === 2️⃣ helpers
     def _normalize(a: str) -> str:
         a = str(a or "")
         a = re.sub(r"multi[-\s]*sites?", "", a, flags=re.I)
         a = re.sub(r"\(.*?\)", "", a)
         a = re.sub(r"\s{2,}", " ", a).strip(" ,")
-        # 🎯 Chessy : corrige Rhône
-        if re.search(r"\bchessy\b", a, flags=re.I):
-            if "69380" in a and "rhône" not in a.lower():
-                a = re.sub(r"\bchessy\b", "Chessy, Rhône", a, flags=re.I)
+        # corrige Chessy Rhône
+        if re.search(r"\bchessy\b", a, flags=re.I) and "69380" in a:
+            a = re.sub(r"\bchessy\b", "Chessy, Rhône", a, flags=re.I)
         return a
 
     def _split_multisite(a: str):
         parts = re.split(r"[;/\n]", str(a or ""))
-        if len(parts) == 1 and "," in parts[0]:
-            parts = re.split(r"(?=,\s*(?:[A-Za-z]{1,2}\d{3,}|L-\d{3,}|ES-\d{4,}|IT-\d{4,}|\d{4,5}\b))", parts[0])
-        return [p.strip(" ,") for p in parts if len(p.strip()) > 5]
+        parts = [p.strip(" ,") for p in parts if len(p.strip()) > 5]
+        return parts or [a]
 
     def _geocode_addr(a: str):
         g = try_geocode_with_fallbacks(a, "France")
@@ -559,32 +558,22 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
         lat, lon, country, cp = g
         alow = a.lower()
 
-        # 🔍 détections pays par motifs / CP
-        if re.search(r"\b\d{4}[a-z]{2}\b", alow):
-            country = "Pays-Bas"       # ex 1101CD
-        elif re.search(r"\bb\d{4}\b", alow):
-            country = "Belgique"       # ex B3570
-        elif re.search(r"\bl-\d{3,5}\b", alow):
-            country = "Luxembourg"
-        elif "voderady" in alow or "slovaqu" in alow:
-            country = "Slovaquie"
-        elif "bettembourg" in alow or "luxembourg" in alow:
-            country = "Luxembourg"
-        elif "ittre" in alow or "sambreville" in alow or "alken" in alow or "machelen" in alow or "maasmechelen" in alow:
-            country = "Belgique"
-        elif "vila-real" in alow or "castellon" in alow or "espa" in alow:
-            country = "Espagne"
-        elif "bedizzole" in alow or "brescia" in alow or "ital" in alow:
-            country = "Italie"
+        # détection manuelle de pays (renforcement)
+        if re.search(r"\b\d{4}[a-z]{2}\b", alow): country = "Pays-Bas"
+        elif re.search(r"\bb\d{4}\b", alow): country = "Belgique"
+        elif re.search(r"\bl-\d{3,5}\b", alow): country = "Luxembourg"
+        elif "voderady" in alow: country = "Slovaquie"
+        elif any(k in alow for k in ["ittre","alken","sambreville","machelen","maasmechelen"]): country = "Belgique"
+        elif any(k in alow for k in ["vila-real","castellon","espa"]): country = "Espagne"
+        elif "bedizzole" in alow or "brescia" in alow or "ital" in alow: country = "Italie"
 
-        # CP récupéré
-        cp_txt = str(cp or "").strip()
-        return (a, (lat, lon), country, cp_txt)
+        return (a, (lat, lon), country, str(cp or ""))
 
-    # ---------- priorité : implantations industrielles ----------
+    # === 3️⃣ on cherche tous les sites industriels valides
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
     siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
 
+    all_sites = []
     for c in indus_cols:
         val = row[c]
         for raw in _split_multisite(val):
@@ -593,9 +582,16 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
             if gg:
                 a2, coords, country, cp = gg
                 dist = geodesic(base_coords, coords).km if base_coords else None
-                return a2, coords, country, cp, dist, "implant_indus"
+                all_sites.append((a2, coords, country, cp, dist, "implant_indus"))
 
-    # ---------- siège ----------
+    # === 4️⃣ si plusieurs implants, garde celui le plus proche du projet
+    if all_sites:
+        all_sites = [s for s in all_sites if s[1] is not None]
+        if all_sites:
+            all_sites.sort(key=lambda x: (x[4] if x[4] is not None else 1e9))
+            return all_sites[0]
+
+    # === 5️⃣ sinon : siège
     for c in siege_cols:
         val = row[c]
         for raw in _split_multisite(val):
@@ -606,7 +602,7 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
                 dist = geodesic(base_coords, coords).km if base_coords else None
                 return a2, coords, country, cp, dist, "siège"
 
-    # ---------- fallback ----------
+    # === 6️⃣ fallback adresse principale
     a = _normalize(addr_field)
     gg = _geocode_addr(a)
     if gg:
@@ -615,9 +611,6 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
         return a2, coords, country, cp, dist, "fallback"
 
     return addr_field, None, "", None, None, "fallback"
- 
-
-
 
 
 # =================== DISTANCES & FINALE =====================
