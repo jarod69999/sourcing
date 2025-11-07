@@ -439,11 +439,14 @@ def _split_multi_addresses(addr_field: str):
  
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Version stabilisée (nov 2025) :
+    Version stabilisée (nov 2025)
     - Priorité stricte aux implantations industrielles
-    - Détection de pays par mots-clés + préfixes CP (ex: B, L-, ES-, NL-, SK-)
-    - Ne force plus un pays étranger si le CP est purement numérique français
-    - Maintient les localisations trouvées précédemment (Ossabois, Retrofitt…)
+    - Détection pays par mots-clés + formes CP (B3570, L-3290, 1101CD…)
+    - Aucun forçage "Espagne" sur un CP purement numérique FR
+    - Cas particuliers: EcoCocon (Slovaquie), Porcelanosa (12540 Espagne),
+      DZ-Construct (Luxembourg), Litobox (Belgique), CCI France Pays-Bas (NL)
+    - Support multi-sites (type KNAUF) avec split robuste
+    Retour: (adresse_retenue, (lat,lon) or None, pays, code_postal, distance_km or None, source_tag)
     """
     from geopy.distance import geodesic
     import re
@@ -451,121 +454,157 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
     if row is None:
         return addr_field, None, "", None, None, "fallback"
 
+    name = str(row.get("Raison sociale", "") or "").strip().lower()
+
+    # ---------- Cartographie villes -> pays (renfort détection) ----------
     CITY_HINTS = {
-        # Pays-Bas
+        # NL
         "amsterdam": "Pays-Bas", "rotterdam": "Pays-Bas", "utrecht": "Pays-Bas",
-        # Belgique
-        "alken": "Belgique", "machelen": "Belgique", "maasmechelen": "Belgique",
-        "ittre": "Belgique", "liège": "Belgique", "bruxelles": "Belgique",
-        # Luxembourg
+        # BE
+        "alken": "Belgique", "maasmechelen": "Belgique", "machelen": "Belgique",
+        "ittre": "Belgique", "aarschot": "Belgique", "bruxelles": "Belgique",
+        # LU
         "bettembourg": "Luxembourg", "esch-sur-alzette": "Luxembourg",
-        # Slovaquie
+        # SK
         "voderady": "Slovaquie", "bratislava": "Slovaquie",
-        # Espagne
-        "vila-real": "Espagne", "castellon": "Espagne", "madrid": "Espagne", "barcelone": "Espagne",
-        # Italie
-        "bedizzole": "Italie", "brescia": "Italie", "milano": "Italie", "rome": "Italie",
+        # ES
+        "vila-real": "Espagne", "villarreal": "Espagne", "castellon": "Espagne",
+        "madrid": "Espagne", "barcelone": "Espagne",
+        # IT
+        "bedizzole": "Italie", "brescia": "Italie", "milano": "Italie", "roma": "Italie",
+        # FR (pour éviter faux positifs ES)
+        "paris": "France", "bordeaux": "France", "lyon": "France", "cenon": "France",
+        "vetre": "France", "anzon": "France",
     }
 
+    # ---------- Détections pays ----------
     def _detect_country(addr: str) -> str:
-        s = addr.lower()
+        s = (addr or "").lower()
         for k, v in CITY_HINTS.items():
             if k in s:
                 return v
-        if re.search(r"\b(nl-|pays-bas|amsterdam)\b", s):
+        # préfixes/indices explicites
+        if re.search(r"\b(nl-|pays-bas)\b", s):
             return "Pays-Bas"
         if re.search(r"\b(b-|belg)\b", s):
             return "Belgique"
         if re.search(r"\b(l-|lux)\b", s):
             return "Luxembourg"
-        if re.search(r"\b(sk-|slovaq)\b", s):
+        if re.search(r"\b(sk-|slovaq)", s):
             return "Slovaquie"
-        if re.search(r"\b(es-|espagn|españa)\b", s):
-            return "Espagne"
-        if re.search(r"\b(it-|ital)\b", s):
+        if re.search(r"\b(it-|ital)", s):
             return "Italie"
+        if re.search(r"\b(es-|espa(ña|gne))\b", s) or "vila-real" in s or "castellon" in s:
+            return "Espagne"
         return "France"
 
+    # ---------- Nettoyage & split multi-sites ----------
     def _normalize(addr: str) -> str:
-        addr = str(addr or "").strip()
-        addr = re.sub(r"multi[-\s]*sites?", "", addr, flags=re.I)
-        addr = re.sub(r"\(.*?\)", "", addr)
-        addr = addr.strip(" ,")
-        return addr
+        a = str(addr or "")
+        a = re.sub(r"multi[-\s]*sites?", "", a, flags=re.I)
+        a = re.sub(r"\(.*?\)", "", a)
+        a = re.sub(r"\s{2,}", " ", a).strip(" ,")
+        return a
 
     def _split_multisite(addr: str):
-        parts = re.split(r"[;/\n]", str(addr))
-        return [p.strip() for p in parts if len(p.strip()) > 8]
+        parts = re.split(r"[;/\n]", str(addr or ""))
+        # si une seule chaîne longue type "..., 68190 Ungersheim, 13106 Rousset, ..."
+        if len(parts) == 1 and "," in parts[0]:
+            # on découpe sur ", <CP> <Ville>" pour extraire séquences françaises
+            chunks = re.split(r"(?=,\s*(?:[A-Za-z]{1,2}\d{3,}|L-\d{3,}|\d{4,5}\b))", parts[0])
+            parts = [p.strip(" ,") for p in chunks if len(p.strip()) > 0]
+        return [p.strip() for p in parts if len(p.strip()) > 5]
 
+    # ---------- Géocodage cadré ----------
     def _geocode(addr: str):
         detected_country = _detect_country(addr)
         g = try_geocode_with_fallbacks(addr, detected_country)
         if not g:
             return None
         lat, lon, country, cp = g
+
+        # si détection par contexte non FR, on l’emporte
         if detected_country and detected_country.lower() != "france":
             country = detected_country
 
         cp_txt = str(cp or "").strip()
-        if not cp_txt:
-            return (addr, (lat, lon), country, None)
 
-        # Pays détectés par forme du code postal
+        # Formes CP indiquant clairement un pays
         if re.match(r"^[A-Za-z]{1,2}\d", cp_txt) or re.match(r"^\d{4}[A-Za-z]{2}$", cp_txt):
-            country = "Pays-Bas"
-        elif cp_txt.startswith(("B", "b")):
-            country = "Belgique"
+            country = "Pays-Bas"      # ex 1101CD
+        elif cp_txt.startswith(("B", "b")) and re.match(r"^B\d{4}$", cp_txt):
+            country = "Belgique"      # ex B3570
         elif cp_txt.startswith("L-"):
-            country = "Luxembourg"
+            country = "Luxembourg"    # ex L-3290
         elif cp_txt.startswith("SK-"):
             country = "Slovaquie"
         elif cp_txt.startswith("IT-"):
             country = "Italie"
-        elif cp_txt.startswith("ES-") or "castellon" in addr.lower() or "vila-real" in addr.lower():
+        elif cp_txt.startswith("ES-"):
             country = "Espagne"
 
-        # Corrige erreurs France/Espagne sur CP purement numériques
+        # Surtout ne PAS forcer Espagne si CP numérique FR
         elif country.lower() == "france" and cp_txt.isdigit():
             n = int(cp_txt)
-            if 1000 <= n <= 9999:
-                country = "Belgique"
-            elif 12000 <= n <= 52999 and not ("paris" in addr.lower() or "bordeaux" in addr.lower()):
-                country = "Espagne"
-            elif n < 1000:
-                country = "Luxembourg"
+            # 1000–9999 = souvent BE/LU/NL, mais si l’adresse contient FR explicite, on garde FR
+            if 1000 <= n <= 9999 and "france" not in addr.lower():
+                # essai heuristique: Luxembourg si "L-" absent mais ville LU détectée
+                if "bettembourg" in addr.lower() or "lux" in addr.lower():
+                    country = "Luxembourg"
+                else:
+                    # dans le doute on ne bascule pas ; on garde ce que renvoie Nominatim
+                    pass
 
-        return (addr, (lat, lon), country, cp)
+        return (addr, (lat, lon), country, cp_txt or None)
 
+    # ---------- Overrides entreprises connues ----------
+    # (on ne touche qu’à l’adresse, le pays/CP seront recalc via _geocode puis ajustés)
+    if "porcelanosa" in name:
+        addr_field = "Butech Porcelanosa Offsite - Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne"
+    elif "ecococon" in name:
+        addr_field = "Voderady 91942, Slovaquie"
+    elif "dz-construct" in name or "dz construct" in name:
+        addr_field = "195 ZAE Wolser F, L-3290 Bettembourg, Luxembourg"
+    elif "litobox" in name:
+        addr_field = "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique"
+    elif "cci france pays-bas" in name:
+        addr_field = "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas"
+
+    # ---------- Parcours colonnes (priorité: indus -> siège -> fallback) ----------
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
     siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
 
+    # 1) Implantations industrielles
     for c in indus_cols:
-        val = row[c]
-        for addr in _split_multisite(val):
-            addr_norm = _normalize(addr)
-            g = _geocode(addr_norm)
+        for addr in _split_multisite(row[c]):
+            a = _normalize(addr)
+            g = _geocode(a)
             if g:
-                a, coords, country, cp = g
+                a2, coords, country, cp = g
                 dist = geodesic(base_coords, coords).km if base_coords else None
-                return a, coords, country, cp, dist, "implant_indus"
+                return a2, coords, country, cp, dist, "implant_indus"
 
+    # 2) Siège
     for c in siege_cols:
-        val = row[c]
-        for addr in _split_multisite(val):
-            addr_norm = _normalize(addr)
-            g = _geocode(addr_norm)
+        for addr in _split_multisite(row[c]):
+            a = _normalize(addr)
+            g = _geocode(a)
             if g:
-                a, coords, country, cp = g
+                a2, coords, country, cp = g
                 dist = geodesic(base_coords, coords).km if base_coords else None
-                return a, coords, country, cp, dist, "siège"
+                return a2, coords, country, cp, dist, "siège"
 
-    g = _geocode(addr_field)
+    # 3) Fallback: colonne "Adresse" (ou équivalent)
+    base_a = _normalize(addr_field)
+    g = _geocode(base_a)
     if g:
-        a, coords, country, cp = g
+        a2, coords, country, cp = g
         dist = geodesic(base_coords, coords).km if base_coords else None
-        return a, coords, country, cp, dist, "fallback"
+        return a2, coords, country, cp, dist, "fallback"
 
     return addr_field, None, "", None, None, "fallback"
+ 
+
 
 
 # =================== DISTANCES & FINALE =====================
