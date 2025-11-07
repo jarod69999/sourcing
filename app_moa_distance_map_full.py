@@ -132,11 +132,10 @@ def clean_internal_codes(addr: str) -> str:
 
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    """Géocode robuste : nettoie, force le pays, corrige les erreurs de pays."""
+    """Géocode robuste : nettoie, force le pays, corrige les erreurs de pays, gère CP + ville."""
     if not query or not isinstance(query, str):
         return None
 
-    # Nettoyage renforcé
     query = clean_street_numbers(clean_internal_codes(_fix_postcode_spaces(_norm(query))))
     if not has_explicit_country(query):
         query = f"{query}, France"
@@ -146,6 +145,11 @@ def geocode(query: str):
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
+        # 👉 Si '29200, Brest' échoue, on retente avec juste la ville + pays
+        if not loc and re.match(r"^\d{4,5},?\s*\w+", query):
+            ville_match = re.sub(r"^\d{4,5}[, ]*", "", query)
+            loc = geolocator.geocode(f"{ville_match}, France", timeout=10, addressdetails=True)
+
         if not loc:
             return None
 
@@ -153,11 +157,10 @@ def geocode(query: str):
         country = addr.get("country", "")
         postcode = addr.get("postcode", "")
 
-        # Corrige le pays incohérent
+        # Corrige incohérences
         if "france" in query.lower() and country.lower() not in ["france", "république française"]:
             country = "France"
 
-        # Si FR et CP à 4 chiffres => on tente d’en extraire un 5 chiffres de l’adresse brute
         if country.lower() == "france" and (len(postcode) < 5 or not postcode.isdigit()):
             cp5 = re.findall(r"\b\d{5}\b", query)
             if cp5:
@@ -168,6 +171,7 @@ def geocode(query: str):
     except Exception as e:
         print(f"⚠️ geocode error: {e}")
         return None
+
 
 
 def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "France"):
