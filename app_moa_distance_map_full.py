@@ -436,140 +436,146 @@ def _split_multi_addresses(addr_field: str):
         if e not in seen:
             out.append(e); seen.add(e)
     return out
- 
-def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
+ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    1️⃣ Priorise systématiquement les implantations industrielles (même si le siège est plus proche)
-    2️⃣ Détecte correctement les pays (FR, BE, LU, NL, SK, ES, IT) et les CP alphanumériques
-    3️⃣ Gère les multi-sites, parenthèses, codes mixtes et erreurs de parsing
-    4️⃣ Retourne : (adresse, coords, pays, cp, distance)
+    Version finale robuste :
+      - Priorité stricte aux implantations industrielles (même si siège plus proche)
+      - Détection automatique des pays (FR, BE, LU, NL, SK, IT, ES…)
+      - Gestion des codes postaux alphanumériques et numériques étrangers
+      - Ignore la colonne 'Pays' du CSV si elle contredit l'adresse
+      - Ajoute un champ 'source' pour savoir quelle adresse a été utilisée
+    Retourne : (adresse, coords, pays, cp, distance, source)
     """
     from geopy.distance import geodesic
     import re
 
     if row is None:
-        return addr_field, None, "", None, None
+        return addr_field, None, "", None, None, "fallback"
 
-    # --- Dictionnaire de villes clés (accélère la détection pays) ---
-    CITY_COUNTRY_HINTS = {
+    # ------------------ Mots-clés villes/pays ------------------
+    CITY_HINTS = {
         # 🇳🇱 Pays-Bas
-        "amsterdam": "Pays-Bas", "rotterdam": "Pays-Bas", "eindhoven": "Pays-Bas", "utrecht": "Pays-Bas",
+        "amsterdam": "Pays-Bas", "rotterdam": "Pays-Bas", "utrecht": "Pays-Bas",
         # 🇧🇪 Belgique
-        "brux": "Belgique", "ittre": "Belgique", "alken": "Belgique", "machelen": "Belgique",
-        "maasmechelen": "Belgique", "liege": "Belgique", "gent": "Belgique",
+        "alken": "Belgique", "machelen": "Belgique", "maasmechelen": "Belgique",
+        "ittre": "Belgique", "liège": "Belgique", "bruxelles": "Belgique",
         # 🇱🇺 Luxembourg
         "bettembourg": "Luxembourg", "esch-sur-alzette": "Luxembourg",
         # 🇸🇰 Slovaquie
         "voderady": "Slovaquie", "bratislava": "Slovaquie",
-        # 🇮🇹 Italie
-        "bedizzole": "Italie", "brescia": "Italie", "milano": "Italie",
         # 🇪🇸 Espagne
         "vila-real": "Espagne", "castellon": "Espagne", "madrid": "Espagne", "barcelone": "Espagne",
+        # 🇮🇹 Italie
+        "bedizzole": "Italie", "brescia": "Italie", "milano": "Italie", "rome": "Italie",
     }
 
-    # --- Fonctions utilitaires ---
+    # ------------------ Détections & Nettoyages ------------------
     def _detect_country(addr: str) -> str:
         s = addr.lower()
-        for k, v in CITY_COUNTRY_HINTS.items():
+        for k, v in CITY_HINTS.items():
             if k in s:
                 return v
-        if "slovaqu" in s or "sk-" in s:
-            return "Slovaquie"
-        if "belg" in s or "b-" in s:
-            return "Belgique"
-        if "luxemb" in s or "l-" in s:
+        if re.search(r"\b(l-|lux)", s):
             return "Luxembourg"
-        if "ital" in s or "it-" in s:
-            return "Italie"
-        if "espagn" in s or "españa" in s or "es-" in s:
+        if re.search(r"\b(b-|belg)", s):
+            return "Belgique"
+        if re.search(r"\b(sk-|slovaq)", s):
+            return "Slovaquie"
+        if re.search(r"\b(es-|espagn|españa)", s):
             return "Espagne"
-        if "pays-bas" in s or "amsterdam" in s or "nl-" in s:
+        if re.search(r"\b(it-|ital)", s):
+            return "Italie"
+        if re.search(r"\b(nl-|pays-bas|amsterdam)", s):
             return "Pays-Bas"
         return "France"
 
-    def _normalize_country(addr: str) -> str:
-        """Nettoie les numéros parasites, retire parenthèses et ajoute pays manquant"""
-        addr = re.sub(r"^\s*\d{2,5}[\-,\s]", "", addr.strip())  # retire "1070", "73-189"
-        addr = re.sub(r"\(.*?\)", "", addr)                     # enlève les parenthèses (Castellón, Espagne)
+    def _normalize(addr: str) -> str:
+        addr = str(addr or "").strip()
+        addr = re.sub(r"^\s*\d{2,5}[\-,\s]", "", addr)  # supprime n° de rue en tête
         addr = re.sub(r"multi[-\s]*sites?", "", addr, flags=re.I)
-        if not has_explicit_country(addr):
-            addr = f"{addr}, {_detect_country(addr)}"
-        return addr.strip(" ,")
+        addr = re.sub(r"\(.*?\)", "", addr)  # retire les parenthèses
+        addr = addr.strip(" ,")
+        return addr
 
     def _split_multisite(addr: str):
-        """Découpe plusieurs adresses dans une même cellule"""
-        addr = addr.replace("\n", ";")
-        parts = re.split(r"[;/]", addr)
-        # garde les sous-adresses significatives
+        parts = re.split(r"[;/\n]", str(addr))
         return [p.strip() for p in parts if len(p.strip()) > 8]
 
-    # --- Récupération des colonnes ---
-    indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
-    siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
-
-    indus_addresses, siege_addresses = [], []
-    for c in indus_cols:
-        indus_addresses.extend(_split_multisite(str(row[c])))
-    for c in siege_cols:
-        siege_addresses.extend(_split_multisite(str(row[c])))
-
-    indus_addresses = [a for a in indus_addresses if a and a.lower() != "nan"]
-    siege_addresses = [a for a in siege_addresses if a and a.lower() != "nan"]
-
-    best = None
-
-    # 🏭 Étape 1 : tester toutes les implantations industrielles
-    for addr in indus_addresses:
-        addr_norm = _normalize_country(addr)
+    def _geocode(addr: str):
         detected_country = _detect_country(addr)
-        g = try_geocode_with_fallbacks(addr_norm, detected_country)
+        g = try_geocode_with_fallbacks(addr, detected_country)
         if not g:
-            continue
+            return None
         lat, lon, country, cp = g
-        # conservation du pays d'origine s’il diffère
+
+        # 🧠 Harmonise avec la détection
         if detected_country and detected_country.lower() != "france":
             country = detected_country
-        # distance
-        d = geodesic(base_coords, (lat, lon)).km
-        # priorité étrangère > française > plus proche
-        if best is None or (country.lower() != "france" and best[3].lower() == "france") or d < best[0]:
-            best = (d, addr_norm, (lat, lon), country, cp)
 
-    # 🏢 Étape 2 : fallback siège
-    if not best and siege_addresses:
-        addr = _normalize_country(siege_addresses[0])
-        g = try_geocode_with_fallbacks(addr, _detect_country(addr))
-        if g:
-            lat, lon, country, cp = g
-            best = (0, addr, (lat, lon), country, cp)
-
-    # 🧩 Étape 3 : finalisation
-    if best:
-        d, addr, coords, country, cp = best
         cp_txt = str(cp or "").strip()
 
-        # Correction de pays selon format CP
-        if re.match(r"^[A-Za-z]{1,2}\d", cp_txt):  # ex: "1101CD"
+        # ------------------ Règles de CP étrangères ------------------
+        if re.match(r"^[A-Za-z]{1,2}\d", cp_txt) or re.match(r"^\d{4}[A-Za-z]{2}$", cp_txt):
+            # ex: 1101CD (Pays-Bas), B3570 (Belgique)
             country = "Pays-Bas"
-        elif len(cp_txt) == 4 and cp_txt.isdigit():
+        elif cp_txt.startswith("B") or cp_txt.startswith("b") or len(cp_txt) == 4:
             country = "Belgique"
         elif cp_txt.startswith("L-"):
             country = "Luxembourg"
         elif cp_txt.startswith("SK-"):
             country = "Slovaquie"
-        elif cp_txt.startswith("ES-") or "castellon" in addr.lower():
-            country = "Espagne"
         elif cp_txt.startswith("IT-"):
             country = "Italie"
+        elif cp_txt.startswith("ES-") or "castellon" in addr.lower() or "vila-real" in addr.lower():
+            country = "Espagne"
+        else:
+            # 🔸 cas où CP numérique étranger (comme Espagne 12540)
+            cp_digits = re.sub(r"\D", "", cp_txt)
+            if cp_digits and cp_digits.isdigit():
+                n = int(cp_digits)
+                if 1000 <= n <= 9999 and country.lower() == "france":
+                    country = "Belgique"
+                elif 12000 <= n <= 52999 and country.lower() == "france":
+                    country = "Espagne"
+                elif n < 1000 and country.lower() == "france":
+                    country = "Luxembourg"
 
-        # si aucun CP trouvé → on tente depuis l’adresse brute
-        if not cp:
-            cp = extract_cp_fallback(addr)
+        return (addr, (lat, lon), country, cp)
 
-        return addr, coords, country, cp, d
+    # ------------------ Extraction des colonnes ------------------
+    indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
+    siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
 
-    # Rien de géocodable
-    return addr_field, None, "", extract_cp_fallback(addr_field), None
+    # ------------------ Étape 1 : adresses industrielles ------------------
+    for c in indus_cols:
+        val = row[c]
+        for addr in _split_multisite(val):
+            addr_norm = _normalize(addr)
+            g = _geocode(addr_norm)
+            if g:
+                a, coords, country, cp = g
+                dist = geodesic(base_coords, coords).km if base_coords else None
+                return a, coords, country, cp, dist, "implant_indus"
+
+    # ------------------ Étape 2 : fallback siège ------------------
+    for c in siege_cols:
+        val = row[c]
+        for addr in _split_multisite(val):
+            addr_norm = _normalize(addr)
+            g = _geocode(addr_norm)
+            if g:
+                a, coords, country, cp = g
+                dist = geodesic(base_coords, coords).km if base_coords else None
+                return a, coords, country, cp, dist, "siège"
+
+    # ------------------ Étape 3 : fallback générique ------------------
+    g = _geocode(addr_field)
+    if g:
+        a, coords, country, cp = g
+        dist = geodesic(base_coords, coords).km if base_coords else None
+        return a, coords, country, cp, dist, "fallback"
+
+    return addr_field, None, "", None, None, "fallback"
 
 
 # =================== DISTANCES & FINALE =====================
