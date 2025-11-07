@@ -129,48 +129,106 @@ def clean_internal_codes(addr: str) -> str:
     addr = re.sub(r"\s{2,}", " ", addr).strip(" ,.-")
     return addr
 
-
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    """Géocode robuste : nettoie, force le pays, corrige les erreurs de pays, gère CP + ville."""
+    """
+    Géocode robuste (version unifiée nov. 2025) :
+    - nettoie les adresses et ajoute le pays si absent
+    - gère CP internationaux (Bxxxx, L-xxxx, 1101CD…)
+    - retente automatiquement si 'CP, Ville' échoue
+    - corrige les incohérences France ↔ étranger
+    """
     if not query or not isinstance(query, str):
         return None
 
+    raw_q = str(query)
     query = clean_street_numbers(clean_internal_codes(_fix_postcode_spaces(_norm(query))))
+
+    # 🧹 Ajoute "France" si rien d’explicite
     if not has_explicit_country(query):
         query = f"{query}, France"
 
-    geolocator = Nominatim(user_agent="moa_geo_v14_strict")
+    geolocator = Nominatim(user_agent="moa_geo_v15_unified")
 
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
-        # 👉 Si '29200, Brest' échoue, on retente avec juste la ville + pays
-        if not loc and re.match(r"^\d{4,5},?\s*\w+", query):
-            ville_match = re.sub(r"^\d{4,5}[, ]*", "", query)
-            loc = geolocator.geocode(f"{ville_match}, France", timeout=10, addressdetails=True)
+
+        # 🔁 fallback : "29200, Brest" → "Brest, France"
+        if not loc:
+            m = re.match(r"^\s*\d{4,6}\s*,?\s*(.+)$", query, flags=re.I)
+            if m:
+                fallback = m.group(1).strip()
+                loc = geolocator.geocode(f"{fallback}, France", timeout=12, addressdetails=True)
+        # 🔁 fallback : juste "Ville, France" si tout échoue
+        if not loc and "," not in raw_q and len(raw_q.split()) <= 3:
+            loc = geolocator.geocode(f"{raw_q}, France", timeout=12, addressdetails=True)
 
         if not loc:
             return None
 
         addr = loc.raw.get("address", {})
-        country = addr.get("country", "")
-        postcode = addr.get("postcode", "")
+        country = addr.get("country", "") or ""
+        postcode = (addr.get("postcode", "") or "").strip()
+        qlow = raw_q.lower()
 
-        # Corrige incohérences
+        # 🇫🇷 Harmonisation : forcer France si mentionnée explicitement
         if "france" in query.lower() and country.lower() not in ["france", "république française"]:
             country = "France"
 
+        # 🔍 Détection CP internationaux dans l’adresse brute
+        if re.search(r"\b\d{4}[a-z]{2}\b", qlow):      # ex: 1101CD (NL)
+            country = "Pays-Bas"
+            if not postcode:
+                mcp = re.search(r"(\d{4}[A-Za-z]{2})", raw_q)
+                if mcp: postcode = mcp.group(1).upper()
+        elif re.search(r"\bb\d{4}\b", qlow):           # ex: B3570 (BE)
+            country = "Belgique"
+            if not postcode:
+                mcp = re.search(r"(B\d{4})", raw_q, flags=re.I)
+                if mcp: postcode = mcp.group(1).upper()
+        elif re.search(r"\bl-\d{3,5}\b", qlow):        # ex: L-3290 (LU)
+            country = "Luxembourg"
+        elif re.search(r"\bsk[-\s]?\d{4,}\b", qlow):   # ex: SK-91942 (SK)
+            country = "Slovaquie"
+        elif re.search(r"\bit[-\s]?\d{4,}\b", qlow):
+            country = "Italie"
+        elif re.search(r"\bes[-\s]?\d{4,}\b", qlow) or "castellon" in qlow or "vila-real" in qlow:
+            country = "Espagne"
+
+        # 🔍 Détection par ville ou mot-clé
+        city_hints = {
+            # BE
+            "alken": "Belgique", "sambreville": "Belgique", "ittre": "Belgique",
+            "machelen": "Belgique", "maasmechelen": "Belgique", "bruxelles": "Belgique",
+            # LU
+            "bettembourg": "Luxembourg", "esch-sur-alzette": "Luxembourg",
+            # SK
+            "voderady": "Slovaquie", "bratislava": "Slovaquie",
+            # NL
+            "amsterdam": "Pays-Bas", "rotterdam": "Pays-Bas", "utrecht": "Pays-Bas",
+            # ES
+            "vila-real": "Espagne", "castellon": "Espagne", "madrid": "Espagne",
+            # IT
+            "bedizzole": "Italie", "brescia": "Italie",
+        }
+        for k, v in city_hints.items():
+            if k in qlow:
+                country = v
+                break
+
+        # 🇫🇷 Correction CP France (4 chiffres ou absent)
         if country.lower() == "france" and (len(postcode) < 5 or not postcode.isdigit()):
-            cp5 = re.findall(r"\b\d{5}\b", query)
+            cp5 = re.findall(r"\b\d{5}\b", raw_q)
             if cp5:
                 postcode = cp5[-1]
 
-        return (loc.latitude, loc.longitude, country, postcode)
+        return (loc.latitude, loc.longitude, country or "", postcode or "")
 
     except Exception as e:
         print(f"⚠️ geocode error: {e}")
         return None
+
 
 
 
@@ -443,14 +501,13 @@ def _split_multi_addresses(addr_field: str):
  
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Version stabilisée (nov 2025)
+    Version consolidée (nov 2025) :
     - Priorité stricte aux implantations industrielles
-    - Détection pays par mots-clés + formes CP (B3570, L-3290, 1101CD…)
-    - Aucun forçage "Espagne" sur un CP purement numérique FR
-    - Cas particuliers: EcoCocon (Slovaquie), Porcelanosa (12540 Espagne),
-      DZ-Construct (Luxembourg), Litobox (Belgique), CCI France Pays-Bas (NL)
-    - Support multi-sites (type KNAUF) avec split robuste
-    Retour: (adresse_retenue, (lat,lon) or None, pays, code_postal, distance_km or None, source_tag)
+    - Gestion fiable des pays par CP, villes ou noms d'entreprises
+    - Cas particuliers connus (NL, BE, LU, SK, IT, ES)
+    - Garde les comportements stables des anciennes versions (Ossabois, Retrofitt, Gramitherm, Takki…)
+    - Corrige Chessy (69380 Rhône vs 77700 Seine-et-Marne)
+    Retour: (adresse, (lat,lon) or None, pays, code_postal, distance_km or None, source_tag)
     """
     from geopy.distance import geodesic
     import re
@@ -458,156 +515,108 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
     if row is None:
         return addr_field, None, "", None, None, "fallback"
 
-    name = str(row.get("Raison sociale", "") or "").strip().lower()
+    name = str(row.get("Raison sociale", "") or "").lower()
 
-    # ---------- Cartographie villes -> pays (renfort détection) ----------
-    CITY_HINTS = {
-        # NL
-        "amsterdam": "Pays-Bas", "rotterdam": "Pays-Bas", "utrecht": "Pays-Bas",
-        # BE
-        "alken": "Belgique", "maasmechelen": "Belgique", "machelen": "Belgique",
-        "ittre": "Belgique", "aarschot": "Belgique", "bruxelles": "Belgique",
-        # LU
-        "bettembourg": "Luxembourg", "esch-sur-alzette": "Luxembourg",
-        # SK
-        "voderady": "Slovaquie", "bratislava": "Slovaquie",
-        # ES
-        "vila-real": "Espagne", "villarreal": "Espagne", "castellon": "Espagne",
-        "madrid": "Espagne", "barcelone": "Espagne",
-        # IT
-        "bedizzole": "Italie", "brescia": "Italie", "milano": "Italie", "roma": "Italie",
-        # FR (pour éviter faux positifs ES)
-        "paris": "France", "bordeaux": "France", "lyon": "France", "cenon": "France",
-        "vetre": "France", "anzon": "France",
+    # ---------- overrides nom → adresse fiable ----------
+    NAME_OVERRIDES = {
+        "cci france pays-bas": "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas",
+        "litobox": "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique",
+        "ecococon": "Voderady 91942, Slovaquie",
+        "dz-construct": "195, ZAE Wolser F, L-3290 Bettembourg, Luxembourg",
+        "porcelanosa": "Butech Porcelanosa Offsite - Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne",
+        "gramitherm": "Boulevard de l’Europe 87, 5060 Sambreville, Belgique",
+        "takki": "Rue du Halage 13, 1460 Ittre, Belgique",
+        "easy’go wood": "Rue du Halage 13, 1460 Ittre, Belgique",
+        "easy'go wood": "Rue du Halage 13, 1460 Ittre, Belgique",
     }
+    for k, v in NAME_OVERRIDES.items():
+        if k in name:
+            addr_field = v
+            break
 
-    # ---------- Détections pays ----------
-    def _detect_country(addr: str) -> str:
-        s = (addr or "").lower()
-        for k, v in CITY_HINTS.items():
-            if k in s:
-                return v
-        # préfixes/indices explicites
-        if re.search(r"\b(nl-|pays-bas)\b", s):
-            return "Pays-Bas"
-        if re.search(r"\b(b-|belg)\b", s):
-            return "Belgique"
-        if re.search(r"\b(l-|lux)\b", s):
-            return "Luxembourg"
-        if re.search(r"\b(sk-|slovaq)", s):
-            return "Slovaquie"
-        if re.search(r"\b(it-|ital)", s):
-            return "Italie"
-        if re.search(r"\b(es-|espa(ña|gne))\b", s) or "vila-real" in s or "castellon" in s:
-            return "Espagne"
-        return "France"
-
-    # ---------- Nettoyage & split multi-sites ----------
-    def _normalize(addr: str) -> str:
-        a = str(addr or "")
+    # ---------- helpers ----------
+    def _normalize(a: str) -> str:
+        a = str(a or "")
         a = re.sub(r"multi[-\s]*sites?", "", a, flags=re.I)
         a = re.sub(r"\(.*?\)", "", a)
         a = re.sub(r"\s{2,}", " ", a).strip(" ,")
+        # 🎯 Chessy : corrige Rhône
+        if re.search(r"\bchessy\b", a, flags=re.I):
+            if "69380" in a and "rhône" not in a.lower():
+                a = re.sub(r"\bchessy\b", "Chessy, Rhône", a, flags=re.I)
         return a
 
-    def _split_multisite(addr: str):
-        parts = re.split(r"[;/\n]", str(addr or ""))
-        # si une seule chaîne longue type "..., 68190 Ungersheim, 13106 Rousset, ..."
+    def _split_multisite(a: str):
+        parts = re.split(r"[;/\n]", str(a or ""))
         if len(parts) == 1 and "," in parts[0]:
-            # on découpe sur ", <CP> <Ville>" pour extraire séquences françaises
-            chunks = re.split(r"(?=,\s*(?:[A-Za-z]{1,2}\d{3,}|L-\d{3,}|\d{4,5}\b))", parts[0])
-            parts = [p.strip(" ,") for p in chunks if len(p.strip()) > 0]
-        return [p.strip() for p in parts if len(p.strip()) > 5]
+            parts = re.split(r"(?=,\s*(?:[A-Za-z]{1,2}\d{3,}|L-\d{3,}|ES-\d{4,}|IT-\d{4,}|\d{4,5}\b))", parts[0])
+        return [p.strip(" ,") for p in parts if len(p.strip()) > 5]
 
-    # ---------- Géocodage cadré ----------
-    def _geocode(addr: str):
-        detected_country = _detect_country(addr)
-        g = try_geocode_with_fallbacks(addr, detected_country)
+    def _geocode_addr(a: str):
+        g = try_geocode_with_fallbacks(a, "France")
         if not g:
             return None
         lat, lon, country, cp = g
+        alow = a.lower()
 
-        # si détection par contexte non FR, on l’emporte
-        if detected_country and detected_country.lower() != "france":
-            country = detected_country
-
-        cp_txt = str(cp or "").strip()
-
-        # Formes CP indiquant clairement un pays
-        if re.match(r"^[A-Za-z]{1,2}\d", cp_txt) or re.match(r"^\d{4}[A-Za-z]{2}$", cp_txt):
-            country = "Pays-Bas"      # ex 1101CD
-        elif cp_txt.startswith(("B", "b")) and re.match(r"^B\d{4}$", cp_txt):
-            country = "Belgique"      # ex B3570
-        elif cp_txt.startswith("L-"):
-            country = "Luxembourg"    # ex L-3290
-        elif cp_txt.startswith("SK-"):
+        # 🔍 détections pays par motifs / CP
+        if re.search(r"\b\d{4}[a-z]{2}\b", alow):
+            country = "Pays-Bas"       # ex 1101CD
+        elif re.search(r"\bb\d{4}\b", alow):
+            country = "Belgique"       # ex B3570
+        elif re.search(r"\bl-\d{3,5}\b", alow):
+            country = "Luxembourg"
+        elif "voderady" in alow or "slovaqu" in alow:
             country = "Slovaquie"
-        elif cp_txt.startswith("IT-"):
-            country = "Italie"
-        elif cp_txt.startswith("ES-"):
+        elif "bettembourg" in alow or "luxembourg" in alow:
+            country = "Luxembourg"
+        elif "ittre" in alow or "sambreville" in alow or "alken" in alow or "machelen" in alow or "maasmechelen" in alow:
+            country = "Belgique"
+        elif "vila-real" in alow or "castellon" in alow or "espa" in alow:
             country = "Espagne"
+        elif "bedizzole" in alow or "brescia" in alow or "ital" in alow:
+            country = "Italie"
 
-        # Surtout ne PAS forcer Espagne si CP numérique FR
-        elif country.lower() == "france" and cp_txt.isdigit():
-            n = int(cp_txt)
-            # 1000–9999 = souvent BE/LU/NL, mais si l’adresse contient FR explicite, on garde FR
-            if 1000 <= n <= 9999 and "france" not in addr.lower():
-                # essai heuristique: Luxembourg si "L-" absent mais ville LU détectée
-                if "bettembourg" in addr.lower() or "lux" in addr.lower():
-                    country = "Luxembourg"
-                else:
-                    # dans le doute on ne bascule pas ; on garde ce que renvoie Nominatim
-                    pass
+        # CP récupéré
+        cp_txt = str(cp or "").strip()
+        return (a, (lat, lon), country, cp_txt)
 
-        return (addr, (lat, lon), country, cp_txt or None)
-
-    # ---------- Overrides entreprises connues ----------
-    # (on ne touche qu’à l’adresse, le pays/CP seront recalc via _geocode puis ajustés)
-    if "porcelanosa" in name:
-        addr_field = "Butech Porcelanosa Offsite - Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne"
-    elif "ecococon" in name:
-        addr_field = "Voderady 91942, Slovaquie"
-    elif "dz-construct" in name or "dz construct" in name:
-        addr_field = "195 ZAE Wolser F, L-3290 Bettembourg, Luxembourg"
-    elif "litobox" in name:
-        addr_field = "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique"
-    elif "cci france pays-bas" in name:
-        addr_field = "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas"
-
-    # ---------- Parcours colonnes (priorité: indus -> siège -> fallback) ----------
+    # ---------- priorité : implantations industrielles ----------
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
     siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
 
-    # 1) Implantations industrielles
     for c in indus_cols:
-        for addr in _split_multisite(row[c]):
-            a = _normalize(addr)
-            g = _geocode(a)
-            if g:
-                a2, coords, country, cp = g
+        val = row[c]
+        for raw in _split_multisite(val):
+            a = _normalize(raw)
+            gg = _geocode_addr(a)
+            if gg:
+                a2, coords, country, cp = gg
                 dist = geodesic(base_coords, coords).km if base_coords else None
                 return a2, coords, country, cp, dist, "implant_indus"
 
-    # 2) Siège
+    # ---------- siège ----------
     for c in siege_cols:
-        for addr in _split_multisite(row[c]):
-            a = _normalize(addr)
-            g = _geocode(a)
-            if g:
-                a2, coords, country, cp = g
+        val = row[c]
+        for raw in _split_multisite(val):
+            a = _normalize(raw)
+            gg = _geocode_addr(a)
+            if gg:
+                a2, coords, country, cp = gg
                 dist = geodesic(base_coords, coords).km if base_coords else None
                 return a2, coords, country, cp, dist, "siège"
 
-    # 3) Fallback: colonne "Adresse" (ou équivalent)
-    base_a = _normalize(addr_field)
-    g = _geocode(base_a)
-    if g:
-        a2, coords, country, cp = g
+    # ---------- fallback ----------
+    a = _normalize(addr_field)
+    gg = _geocode_addr(a)
+    if gg:
+        a2, coords, country, cp = gg
         dist = geodesic(base_coords, coords).km if base_coords else None
         return a2, coords, country, cp, dist, "fallback"
 
     return addr_field, None, "", None, None, "fallback"
  
+
 
 
 
