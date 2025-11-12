@@ -129,107 +129,45 @@ def clean_internal_codes(addr: str) -> str:
     addr = re.sub(r"\s{2,}", " ", addr).strip(" ,.-")
     return addr
 
+
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
-    """
-    Géocode robuste (version unifiée nov. 2025) :
-    - nettoie les adresses et ajoute le pays si absent
-    - gère CP internationaux (Bxxxx, L-xxxx, 1101CD…)
-    - retente automatiquement si 'CP, Ville' échoue
-    - corrige les incohérences France ↔ étranger
-    """
+    """Géocode robuste : nettoie, force le pays, corrige les erreurs de pays."""
     if not query or not isinstance(query, str):
         return None
 
-    raw_q = str(query)
+    # Nettoyage renforcé
     query = clean_street_numbers(clean_internal_codes(_fix_postcode_spaces(_norm(query))))
-
-    # 🧹 Ajoute "France" si rien d’explicite
     if not has_explicit_country(query):
         query = f"{query}, France"
 
-    geolocator = Nominatim(user_agent="moa_geo_v15_unified")
+    geolocator = Nominatim(user_agent="moa_geo_v14_strict")
 
     try:
         time.sleep(1)
         loc = geolocator.geocode(query, timeout=15, addressdetails=True)
-
-        # 🔁 fallback : "29200, Brest" → "Brest, France"
-        if not loc:
-            m = re.match(r"^\s*\d{4,6}\s*,?\s*(.+)$", query, flags=re.I)
-            if m:
-                fallback = m.group(1).strip()
-                loc = geolocator.geocode(f"{fallback}, France", timeout=12, addressdetails=True)
-        # 🔁 fallback : juste "Ville, France" si tout échoue
-        if not loc and "," not in raw_q and len(raw_q.split()) <= 3:
-            loc = geolocator.geocode(f"{raw_q}, France", timeout=12, addressdetails=True)
-
         if not loc:
             return None
 
         addr = loc.raw.get("address", {})
-        country = addr.get("country", "") or ""
-        postcode = (addr.get("postcode", "") or "").strip()
-        qlow = raw_q.lower()
+        country = addr.get("country", "")
+        postcode = addr.get("postcode", "")
 
-        # 🇫🇷 Harmonisation : forcer France si mentionnée explicitement
+        # Corrige le pays incohérent
         if "france" in query.lower() and country.lower() not in ["france", "république française"]:
             country = "France"
 
-        # 🔍 Détection CP internationaux dans l’adresse brute
-        if re.search(r"\b\d{4}[a-z]{2}\b", qlow):      # ex: 1101CD (NL)
-            country = "Pays-Bas"
-            if not postcode:
-                mcp = re.search(r"(\d{4}[A-Za-z]{2})", raw_q)
-                if mcp: postcode = mcp.group(1).upper()
-        elif re.search(r"\bb\d{4}\b", qlow):           # ex: B3570 (BE)
-            country = "Belgique"
-            if not postcode:
-                mcp = re.search(r"(B\d{4})", raw_q, flags=re.I)
-                if mcp: postcode = mcp.group(1).upper()
-        elif re.search(r"\bl-\d{3,5}\b", qlow):        # ex: L-3290 (LU)
-            country = "Luxembourg"
-        elif re.search(r"\bsk[-\s]?\d{4,}\b", qlow):   # ex: SK-91942 (SK)
-            country = "Slovaquie"
-        elif re.search(r"\bit[-\s]?\d{4,}\b", qlow):
-            country = "Italie"
-        elif re.search(r"\bes[-\s]?\d{4,}\b", qlow) or "castellon" in qlow or "vila-real" in qlow:
-            country = "Espagne"
-
-        # 🔍 Détection par ville ou mot-clé
-        city_hints = {
-            # BE
-            "alken": "Belgique", "sambreville": "Belgique", "ittre": "Belgique",
-            "machelen": "Belgique", "maasmechelen": "Belgique", "bruxelles": "Belgique",
-            # LU
-            "bettembourg": "Luxembourg", "esch-sur-alzette": "Luxembourg",
-            # SK
-            "voderady": "Slovaquie", "bratislava": "Slovaquie",
-            # NL
-            "amsterdam": "Pays-Bas", "rotterdam": "Pays-Bas", "utrecht": "Pays-Bas",
-            # ES
-            "vila-real": "Espagne", "castellon": "Espagne", "madrid": "Espagne",
-            # IT
-            "bedizzole": "Italie", "brescia": "Italie",
-        }
-        for k, v in city_hints.items():
-            if k in qlow:
-                country = v
-                break
-
-        # 🇫🇷 Correction CP France (4 chiffres ou absent)
+        # Si FR et CP à 4 chiffres => on tente d’en extraire un 5 chiffres de l’adresse brute
         if country.lower() == "france" and (len(postcode) < 5 or not postcode.isdigit()):
-            cp5 = re.findall(r"\b\d{5}\b", raw_q)
+            cp5 = re.findall(r"\b\d{5}\b", query)
             if cp5:
                 postcode = cp5[-1]
 
-        return (loc.latitude, loc.longitude, country or "", postcode or "")
+        return (loc.latitude, loc.longitude, country, postcode)
 
     except Exception as e:
         print(f"⚠️ geocode error: {e}")
         return None
-
-
 
 
 def try_geocode_with_fallbacks(raw_addr: str, assumed_country_hint: str = "France"):
@@ -402,7 +340,7 @@ def choose_contact_moa(row, colmap):
             return em
 
     return ""
-
+ 
 def process_csv_to_df(csv_bytes):
     """
     Lit le CSV et construit le DataFrame de base :
@@ -468,121 +406,124 @@ def process_csv_to_df(csv_bytes):
 
     return out
 
+
 # ============== MULTI-SITES AVEC PRIORITÉ INDUS =============
+def _split_multi_addresses(addr_field: str):
+    """
+    Découpe souple : virgules, points-virgules, slash, retours ligne.
+    Conserve chaque segment brut.
+    """
+    if not isinstance(addr_field, str) or not addr_field.strip():
+        return []
+    text = _norm(addr_field)
+    parts = re.split(r"[;\n/]", text)
+    flat = []
+    for p in parts:
+        chunks = [c.strip() for c in p.split(",") if c.strip()]
+        if chunks:
+            buf=[]; acc=[]
+            for c in chunks:
+                acc.append(c)
+                joined = ", ".join(acc)
+                if len(acc)>=3 or extract_cp_fallback(joined):
+                    buf.append(joined); acc=[]
+            if acc: buf.append(", ".join(acc))
+            flat.extend(buf)
+    if not flat:
+        flat = [text]
+    seen=set(); out=[]
+    for e in flat:
+        if e not in seen:
+            out.append(e); seen.add(e)
+    return out
+ 
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Version stable (févr. 2025)
-    - Priorité aux implantations industrielles
-    - Détection fiable des pays européens
-    - Corrections pour Litobox, CCI Pays-Bas, DZ-Construct, EcoCocon, Porcelanosa
+    1️⃣ Parmi les colonnes 'implant-indus-2..5', on garde la plus proche du projet.
+    2️⃣ Si aucune implantation industrielle géocodable, on prend 'Adresse-du-siège'.
+    3️⃣ Sinon, on retourne la première adresse trouvée.
     """
     from geopy.distance import geodesic
-    import re
 
     if row is None:
-        return addr_field, None, "", None, None, "fallback"
+        return addr_field, None, "", None, None
 
-    name = str(row.get("Raison sociale", "")).lower()
-    addr_field = str(addr_field or "").strip()
+    # 🔍 Récupération des colonnes
+    indus_cols = [c for c in row.index if ("implant" in c.lower() and "indus" in c.lower())]
+    siege_cols = [c for c in row.index if ("siège" in c.lower() or "siege" in c.lower())]
 
-    # Cas particuliers d'entreprises connues
-    if "porcelanosa" in name:
-        addr_field = "Butech Porcelanosa Offsite - Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne"
-        forced_country, forced_cp = "Espagne", "12540"
-    elif "ecococon" in name:
-        addr_field = "Voderady, 919 42, Slovaquie"
-        forced_country, forced_cp = "Slovaquie", "91942"
-    elif "dz-construct" in name or "dz construct" in name:
-        addr_field = "195 ZAE Wolser F, L-3290 Bettembourg, Luxembourg"
-        forced_country, forced_cp = "Luxembourg", "L-3290"
-    elif "litobox" in name:
-        addr_field = "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique"
-        forced_country, forced_cp = "Belgique", "B3570"
-    elif "cci france pays-bas" in name:
-        addr_field = "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas"
-        forced_country, forced_cp = "Pays-Bas", "1101CD"
-    else:
-        forced_country = forced_cp = None
+    indus_addresses = [str(row[c]).strip() for c in indus_cols if str(row[c]).strip() and str(row[c]).lower() != "nan"]
+    siege_addresses = [str(row[c]).strip() for c in siege_cols if str(row[c]).strip() and str(row[c]).lower() != "nan"]
 
-    CITY_HINTS = {
-        "amsterdam": "Pays-Bas", "alken": "Belgique", "bettembourg": "Luxembourg",
-        "voderady": "Slovaquie", "vila-real": "Espagne", "castellon": "Espagne",
-        "vetre": "France", "anzon": "France", "cenon": "France"
-    }
+    best = None
 
-    def _detect_country(addr: str) -> str:
-        s = addr.lower()
-        for k, v in CITY_HINTS.items():
-            if k in s:
-                return v
-        if re.search(r"\b(L-|lux)", s):
-            return "Luxembourg"
-        if re.search(r"\b(B|b)\d{4}", s):
-            return "Belgique"
-        if re.search(r"\b\d{4}[A-Za-z]{2}\b", s):
-            return "Pays-Bas"
-        if re.search(r"\b(SK-|slovaq)", s):
-            return "Slovaquie"
-        if re.search(r"\b(ES-|espagn|vila)", s):
-            return "Espagne"
-        return "France"
+    # 🏭 priorité : toutes les implantations industrielles -> garder la plus proche
+    for addr in indus_addresses:
+        # ajout automatique d'un pays s'il manque
+        addr_norm = addr
+        if not has_explicit_country(addr_norm):
+            if "voderady" in addr_norm.lower():
+                addr_norm += ", Slovaquie"
+            elif "bedizzole" in addr_norm.lower():
+                addr_norm += ", Italie"
+            else:
+                addr_norm += ", France"
 
-    def _geocode(addr: str):
-        country = forced_country or _detect_country(addr)
-        g = try_geocode_with_fallbacks(addr, country)
+        g = try_geocode_with_fallbacks(addr_norm)
         if not g:
-            return None
-        lat, lon, _, cp = g
-        cp = forced_cp or cp
-        return (addr, (lat, lon), country, cp)
+            continue
+        lat, lon, country, cp = g
+        d = geodesic(base_coords, (lat, lon)).km
+        if best is None or d < best[0]:
+            best = (d, addr_norm, (lat, lon), country, cp)
 
-    indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
-    siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
+    # 🏢 fallback : siège si aucune indus géocodable
+    if not best and siege_addresses:
+        addr = siege_addresses[0]
+        addr_norm = addr if has_explicit_country(addr) else f"{addr}, France"
+        g = try_geocode_with_fallbacks(addr_norm)
+        if g:
+            lat, lon, country, cp = g
+            best = (0, addr_norm, (lat, lon), country, cp)
 
-    for c in indus_cols:
-        for addr in re.split(r"[;/\n]", str(row[c])):
-            addr = addr.strip()
-            if len(addr) > 8:
-                g = _geocode(addr)
-                if g:
-                    a, coords, country, cp = g
-                    dist = geodesic(base_coords, coords).km if base_coords else None
-                    return a, coords, country, cp, dist, "implant_indus"
+    if best:
+        d, addr, coords, country, cp = best
+        return addr, coords, country, (cp or extract_cp_fallback(addr)), d
 
-    for c in siege_cols:
-        for addr in re.split(r"[;/\n]", str(row[c])):
-            addr = addr.strip()
-            if len(addr) > 8:
-                g = _geocode(addr)
-                if g:
-                    a, coords, country, cp = g
-                    dist = geodesic(base_coords, coords).km if base_coords else None
-                    return a, coords, country, cp, dist, "siège"
+    # rien de géocodable
+    return addr_field, None, "", extract_cp_fallback(addr_field), None
 
-    g = _geocode(addr_field)
-    if g:
-        a, coords, country, cp = g
-        dist = geodesic(base_coords, coords).km if base_coords else None
-        return a, coords, country, cp, dist, "fallback"
-
-    return addr_field, None, "", None, None, "fallback"
 
 
 
 # =================== DISTANCES & FINALE =====================
+
 def compute_distances(df, base_address):
-    """Base projet robuste : accepte CP seul, 'CP Ville' ou adresse complète."""
-    if not base_address or not str(base_address).strip():
+    """Adresse du projet (CP+ville ou complète). Toujours géocodable, même avec un code postal seul."""
+    if not base_address.strip():
         st.warning("⚠️ Aucune adresse de référence fournie.")
         return df, None, {}
 
     q = _fix_postcode_spaces(_norm(base_address))
 
-    # essai direct
-    q_base = q if has_explicit_country(q) else f"{q}, France"
-    base = geocode(q_base)
+    # --- 🧠 nouveau bloc : accepte CP seul directement
+    geolocator = Nominatim(user_agent="moa_geo_v16_unified")
+    base = None
+    if re.fullmatch(r"\d{5}", q):  # simple code postal ex: "33210"
+        try:
+            loc = geolocator.geocode(f"{q}, France", timeout=12)
+            if loc:
+                base = (loc.latitude, loc.longitude, "France", q)
+                st.info(f"📍 Lieu de référence interprété comme : {q}, France")
+        except Exception as e:
+            print(f"⚠️ geocode CP direct échoué: {e}")
 
-    # fallback CP/ville connus
+    # 1️⃣ premier essai complet (ex : "33210 Langon" ou "Brest")
+    if not base:
+        q_base = q if has_explicit_country(q) else f"{q}, France"
+        base = geocode(q_base)
+
+    # 2️⃣ fallback : si rien trouvé → détection automatique par CP/Ville
     if not base:
         cp, ville = extract_cp_city(q)
         if not cp and re.fullmatch(r"\d{5}", q):
@@ -597,67 +538,87 @@ def compute_distances(df, base_address):
             "33000": "Bordeaux",
             "69000": "Lyon",
         }
+
         if q in CP_HINTS:
-            base = geocode(f"{CP_HINTS[q]}, France")
+            base_hint = f"{CP_HINTS[q]}, France"
+        elif cp and not ville:
+            base_hint = f"{cp}, France"
         elif cp and ville:
-            base = geocode(f"{cp} {ville}, France")
-        elif cp:
-            base = geocode(f"{cp}, France")
-        elif ville:
+            base_hint = f"{cp} {ville}, France"
+        else:
+            base_hint = f"{q}, France"
+
+        base = geocode(base_hint)
+
+        # 🔁 dernière chance : juste la ville
+        if not base and ville:
             base = geocode(f"{ville}, France")
 
+        if base:
+            st.info(f"ℹ️ Lieu de référence interprété comme : {base_hint}")
+
+    # 3️⃣ si toujours rien → erreur propre (sans bloquer)
     if not base:
-        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'.")
+        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'. "
+                   f"👉 Vérifie simplement le code postal ou ajoute une ville.")
         df2 = df.copy()
-        df2["Pays"] = df2.get("Pays","")
-        df2["Code postal"] = df2.get("Code postal","")
+        df2["Pays"] = ""
+        df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
         df2["Distance au projet"] = ""
+        df2["Type de distance"] = ""
+        df2["Fiabilité géocode"] = ""
         return df2, None, {}
 
+    # ✅ Base trouvée
     base_coords = (base[0], base[1])
+    chosen_coords, chosen_rows = {}, []
 
-    chosen_coords, rows = {}, []
     for _, row in df.iterrows():
-        nom = str(row.get("Raison sociale","")).strip()
-        adr = str(row.get("Adresse",""))
+        name = str(row.get("Raison sociale", "")).strip()
+        adresse = str(row.get("Adresse", ""))
 
-        kept_addr, coords, country, cp, dist_pref, _ = pick_site_with_indus_priority(adr, base_coords, row)
- 
-        # secours coords si on a un CP/Ville
+        kept_addr, coords, country, cp, best_dist, source_addr = pick_site_with_indus_priority(
+            adresse, base_coords, row
+        )
+
+        # tentative secours CP+Ville
         if not coords:
             cpe, villee = extract_cp_city(kept_addr)
             if cpe or villee:
                 g = geocode(f"{cpe} {villee}".strip() + ("" if has_explicit_country(kept_addr) else ", France"))
                 if g:
                     coords = (g[0], g[1])
-                    country = country or g[2] or "France"
-                    cp = cp or g[3] or cpe
+                    if not country:
+                        country = g[2] or ("France" if not has_explicit_country(kept_addr) else "")
+                    if not cp:
+                        cp = g[3] or cpe
 
-        # distance
+        # calcul de distance
         if coords:
-            dist, _ = distance_km(base_coords, coords)
+            dist, dist_type = distance_km(base_coords, coords)
         else:
-            dist = round(dist_pref) if isinstance(dist_pref, (int,float)) else None
+            dist = round(best_dist) if best_dist is not None else None
+            dist_type = ""
 
-        # jamais d'adresse vide dans l'export
-        if not kept_addr or str(kept_addr).lower() == "nan":
-            kept_addr = f"{cp or ''} {country or ''}".strip() or (row.get("Adresse","") or "")
-
-        rows.append({
-            "Raison sociale": nom,
+        chosen_rows.append({
+            "Raison sociale": name,
             "Pays": country or "",
             "Adresse": kept_addr,
             "Code postal": cp or "",
             "Distance au projet": dist,
-            "Catégories": row.get("Catégories",""),
-            "Référent MOA": row.get("Référent MOA",""),
-            "Contact MOA": row.get("Contact MOA",""),
+            "Catégories": row.get("Catégories", ""),
+            "Référent MOA": row.get("Référent MOA", ""),
+            "Contact MOA": row.get("Contact MOA", ""),
+            "Type de distance": dist_type,
+            "Source adresse": source_addr,
+            "Fiabilité géocode": source_addr,  # ✅ nouvelle colonne
         })
 
         if coords:
-            chosen_coords[nom] = (coords[0], coords[1], country or "")
+            chosen_coords[name] = (coords[0], coords[1], country or "")
 
-    return pd.DataFrame(rows), base_coords, chosen_coords
+    out = pd.DataFrame(chosen_rows)
+    return out, base_coords, chosen_coords
 
 
 # ========================= EXCEL ============================
@@ -774,4 +735,7 @@ if file and (mode == "🧾 Mode simple" or base_address):
 
     except Exception as e:
         st.error(f"Erreur : {e}")
+
+
+
 
