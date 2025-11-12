@@ -402,42 +402,54 @@ def choose_contact_moa(row, colmap):
             return em
 
     return ""
- 
+
 def process_csv_to_df(csv_bytes):
     """
-    Lit le CSV et construit le DataFrame de base :
-    - conserve les colonnes essentielles (raison, catégorie, adresse, référent)
-    - calcule le Contact MOA selon la logique élargie (v12-style)
-    - garde les colonnes d'implantations industrielles et du siège pour la sélection des sites
-    - crée toujours une colonne 'Adresse' même si elle n’existe pas dans le CSV
+    Lecture robuste du CSV :
+    - tente d'abord le point-virgule (séparateur européen classique)
+    - fallback vers la virgule si une seule colonne est détectée
+    - supprime les guillemets parasites et espaces
+    - puis détecte les colonnes importantes (raison, adresse, etc.)
     """
-    try:
-        df = pd.read_csv(csv_bytes, sep=None, engine="python")
-    except Exception:
-        df = pd.read_csv(csv_bytes, sep=";", engine="python")
+    import io
 
-    # Détection des colonnes importantes
+    # 1️⃣ lecture brute
+    try:
+        df = pd.read_csv(csv_bytes, sep=";", engine="python", encoding="utf-8-sig")
+    except Exception:
+        df = pd.read_csv(csv_bytes, sep=None, engine="python", encoding="utf-8-sig")
+
+    # 2️⃣ si tout est dans une seule colonne → relire avec séparateur virgule
+    if len(df.columns) == 1:
+        csv_bytes.seek(0)
+        df = pd.read_csv(csv_bytes, sep=",", engine="python", encoding="utf-8-sig")
+
+    # 3️⃣ nettoyage des noms de colonnes
+    df.columns = [str(c).strip().replace('"', '') for c in df.columns]
+
+    # 4️⃣ suppression guillemets parasites dans le contenu
+    for c in df.columns:
+        if df[c].dtype == "object":
+            df[c] = df[c].astype(str).str.replace('"', '').str.strip()
+
+    # --- ensuite ton code existant ---
     colmap = _find_columns(df.columns)
 
     out = pd.DataFrame()
-
-    # --- Colonnes principales ---
     out["Raison sociale"] = (
         df[colmap.get("raison", "")].astype(str).fillna("")
         if colmap.get("raison") else df.get("Raison sociale", "")
     )
-
     out["Référent MOA"] = (
         df[colmap.get("referent", "")].astype(str).fillna("")
         if colmap.get("referent") else df.get("Référent MOA", "")
     )
-
     out["Catégories"] = (
         df[colmap.get("categorie", "")].astype(str).fillna("")
         if colmap.get("categorie") else df.get("Catégories", "")
     )
 
-    # --- Adresse principale : crée toujours la colonne ---
+    # --- Adresse principale ---
     if colmap.get("adresse"):
         out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("")
     elif "Adresse" in df.columns:
@@ -447,26 +459,19 @@ def process_csv_to_df(csv_bytes):
     elif "adresse-du-siège" in df.columns:
         out["Adresse"] = df["adresse-du-siège"].astype(str).fillna("")
     else:
-        # dernier recours : première adresse industrielle trouvée
         possible_cols = [c for c in df.columns if "implant" in c.lower()]
-        if possible_cols:
-            out["Adresse"] = df[possible_cols[0]].astype(str).fillna("")
-        else:
-            out["Adresse"] = ""
+        out["Adresse"] = df[possible_cols[0]].astype(str).fillna("") if possible_cols else ""
 
-    # --- Contact MOA (calcul automatique) ---
+    # --- Contact MOA ---
     out["Contact MOA"] = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
 
-    # --- Colonnes supplémentaires : implantations industrielles et siège ---
-    extra_cols = []
-    for c in df.columns:
-        cl = str(c).lower()
-        if ("implant" in cl and "indus" in cl) or ("siège" in cl) or ("siege" in cl):
-            extra_cols.append(c)
+    # --- Colonnes supplémentaires ---
+    extra_cols = [c for c in df.columns if any(k in c.lower() for k in ["implant", "indus", "siège", "siege"])]
     for c in extra_cols:
         out[c] = df[c].astype(str).fillna("")
 
     return out
+
 
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
