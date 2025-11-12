@@ -577,7 +577,7 @@ def compute_distances(df, base_address):
 
     q = _fix_postcode_spaces(_norm(base_address))
 
-    # --- 🧠 nouveau bloc : accepte CP seul directement
+    # --- 🧠 accepte CP seul directement
     geolocator = Nominatim(user_agent="moa_geo_v16_unified")
     base = None
     if re.fullmatch(r"\d{5}", q):  # simple code postal ex: "33210"
@@ -648,9 +648,11 @@ def compute_distances(df, base_address):
         name = str(row.get("Raison sociale", "")).strip()
         adresse = str(row.get("Adresse", ""))
 
-        kept_addr, coords, country, cp, best_dist, source_addr = pick_site_with_indus_priority(
+        # ✅ correction : fonction renvoie 5 valeurs, pas 6
+        kept_addr, coords, country, cp, best_dist = pick_site_with_indus_priority(
             adresse, base_coords, row
         )
+        source_addr = "indus"
 
         # tentative secours CP+Ville
         if not coords:
@@ -671,6 +673,10 @@ def compute_distances(df, base_address):
             dist = round(best_dist) if best_dist is not None else None
             dist_type = ""
 
+        # jamais d'adresse vide dans l'export
+        if not kept_addr or str(kept_addr).lower() == "nan":
+            kept_addr = f"{cp or ''} {country or ''}".strip() or (row.get("Adresse", "") or "")
+
         chosen_rows.append({
             "Raison sociale": name,
             "Pays": country or "",
@@ -681,8 +687,7 @@ def compute_distances(df, base_address):
             "Référent MOA": row.get("Référent MOA", ""),
             "Contact MOA": row.get("Contact MOA", ""),
             "Type de distance": dist_type,
-            "Source adresse": source_addr,
-            "Fiabilité géocode": source_addr,  # ✅ nouvelle colonne
+            "Fiabilité géocode": source_addr,
         })
 
         if coords:
@@ -690,6 +695,7 @@ def compute_distances(df, base_address):
 
     out = pd.DataFrame(chosen_rows)
     return out, base_coords, chosen_coords
+
 
 
 # ========================= EXCEL ============================
