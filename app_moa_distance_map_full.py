@@ -405,79 +405,39 @@ def choose_contact_moa(row, colmap):
 
 def process_csv_to_df(csv_bytes):
     """
-    Lecture robuste du CSV :
-    - détecte automatiquement le bon séparateur ( ; , ou tab )
-    - ignore les lignes corrompues ("Expected X fields")
-    - gère encodage UTF-8 / Windows-1252
-    - retourne toujours un DataFrame valide (jamais None)
-    - prépare les colonnes clés pour l’analyse MOA
+    Lit le CSV et construit le DataFrame de base :
+    - conserve les colonnes essentielles (raison, catégorie, adresse, référent)
+    - calcule le Contact MOA selon la logique élargie (v12-style)
+    - garde les colonnes d'implantations industrielles et du siège pour la sélection des sites
+    - crée toujours une colonne 'Adresse' même si elle n’existe pas dans le CSV
     """
-    import io, csv
-
-    # --- Lecture brute du contenu
     try:
-        raw = csv_bytes.read().decode("utf-8-sig", errors="ignore")
+        df = pd.read_csv(csv_bytes, sep=None, engine="python")
     except Exception:
-        csv_bytes.seek(0)
-        raw = csv_bytes.read().decode("latin-1", errors="ignore")
+        df = pd.read_csv(csv_bytes, sep=";", engine="python")
 
-    # --- Détection du séparateur dominant
-    sample = raw.splitlines()[:30]
-    sep_candidates = [";", ",", "\t"]
-    sep = max(sep_candidates, key=lambda s: sum(line.count(s) for line in sample))
-
-    # --- Nettoyage lignes vides / commentaires
-    cleaned_lines = [l for l in raw.splitlines() if l.strip() and not l.strip().startswith("#")]
-    cleaned_text = "\n".join(cleaned_lines)
-
-    # --- Lecture robuste
-    try:
-        df = pd.read_csv(io.StringIO(cleaned_text), sep=sep, engine="python", on_bad_lines="skip")
-    except Exception as e:
-        st.warning(f"⚠️ Erreur lecture CSV ({e}) → tentative sans séparateur forcé.")
-        try:
-            df = pd.read_csv(io.StringIO(cleaned_text), engine="python", on_bad_lines="skip")
-        except Exception as e2:
-            st.error(f"❌ Lecture CSV impossible : {e2}")
-            return pd.DataFrame()
-
-    if df.empty:
-        st.warning("⚠️ Le fichier CSV est vide ou ne contient pas de données valides.")
-        return pd.DataFrame()
-
-    # --- Nettoyage colonnes
-    df.columns = [str(c).strip().replace('"', '') for c in df.columns]
-    for c in df.columns:
-        if df[c].dtype == "object":
-            df[c] = df[c].astype(str).str.replace('"', '').str.strip()
-
-    st.info(f"✅ Fichier lu avec séparateur '{sep}' — {len(df.columns)} colonnes détectées.")
-
-    # ============================
-    #      STRUCTURE MOA
-    # ============================
+    # Détection des colonnes importantes
     colmap = _find_columns(df.columns)
+
     out = pd.DataFrame()
 
-    # --- Raison sociale
+    # --- Colonnes principales ---
     out["Raison sociale"] = (
         df[colmap.get("raison", "")].astype(str).fillna("")
         if colmap.get("raison") else df.get("Raison sociale", "")
     )
 
-    # --- Référent MOA
     out["Référent MOA"] = (
         df[colmap.get("referent", "")].astype(str).fillna("")
         if colmap.get("referent") else df.get("Référent MOA", "")
     )
 
-    # --- Catégories
     out["Catégories"] = (
         df[colmap.get("categorie", "")].astype(str).fillna("")
         if colmap.get("categorie") else df.get("Catégories", "")
     )
 
-    # --- Adresse principale
+    # --- Adresse principale : crée toujours la colonne ---
     if colmap.get("adresse"):
         out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("")
     elif "Adresse" in df.columns:
@@ -494,10 +454,10 @@ def process_csv_to_df(csv_bytes):
         else:
             out["Adresse"] = ""
 
-    # --- Contact MOA
+    # --- Contact MOA (calcul automatique) ---
     out["Contact MOA"] = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
 
-    # --- Implantations industrielles / siège
+    # --- Colonnes supplémentaires : implantations industrielles et siège ---
     extra_cols = []
     for c in df.columns:
         cl = str(c).lower()
@@ -508,7 +468,7 @@ def process_csv_to_df(csv_bytes):
 
     return out
 
-
+# ============== MULTI-SITES AVEC PRIORITÉ INDUS =============
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
     Version stable (févr. 2025)
