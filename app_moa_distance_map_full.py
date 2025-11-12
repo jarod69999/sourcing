@@ -403,36 +403,41 @@ def choose_contact_moa(row, colmap):
 
     return ""
 
+
 def process_csv_to_df(csv_bytes):
     """
-    Lecture robuste du CSV :
-    - tente d'abord le point-virgule (séparateur européen classique)
-    - fallback vers la virgule si une seule colonne est détectée
-    - supprime les guillemets parasites et espaces
-    - puis détecte les colonnes importantes (raison, adresse, etc.)
+    Lecture ultra-robuste du CSV :
+    - teste séparateurs ; , \t
+    - choisit celui qui donne le plus de colonnes
+    - gère les encodages et retire les guillemets parasites
     """
-    import io
+    import io, csv
 
-    # 1️⃣ lecture brute
-    try:
-        df = pd.read_csv(csv_bytes, sep=";", engine="python", encoding="utf-8-sig")
-    except Exception:
-        df = pd.read_csv(csv_bytes, sep=None, engine="python", encoding="utf-8-sig")
+    # Convertir le flux en texte brut
+    raw = csv_bytes.read().decode("utf-8-sig", errors="ignore")
+    sample = raw.splitlines()[0]
+    candidates = [";", ",", "\t"]
 
-    # 2️⃣ si tout est dans une seule colonne → relire avec séparateur virgule
-    if len(df.columns) == 1:
-        csv_bytes.seek(0)
-        df = pd.read_csv(csv_bytes, sep=",", engine="python", encoding="utf-8-sig")
+    # Tester quel séparateur donne le plus de colonnes
+    best_sep, max_cols = ",", 0
+    for sep in candidates:
+        cols = next(csv.reader([sample], delimiter=sep))
+        if len(cols) > max_cols:
+            max_cols = len(cols)
+            best_sep = sep
 
-    # 3️⃣ nettoyage des noms de colonnes
+    # Recharge avec le bon séparateur
+    df = pd.read_csv(io.StringIO(raw), sep=best_sep, engine="python")
     df.columns = [str(c).strip().replace('"', '') for c in df.columns]
 
-    # 4️⃣ suppression guillemets parasites dans le contenu
+    # Nettoyage de base
     for c in df.columns:
         if df[c].dtype == "object":
             df[c] = df[c].astype(str).str.replace('"', '').str.strip()
 
-    # --- ensuite ton code existant ---
+    st.info(f"✅ Fichier lu avec séparateur '{best_sep}' — {len(df.columns)} colonnes détectées.")
+
+    # === reste de ton code inchangé ===
     colmap = _find_columns(df.columns)
 
     out = pd.DataFrame()
@@ -449,7 +454,7 @@ def process_csv_to_df(csv_bytes):
         if colmap.get("categorie") else df.get("Catégories", "")
     )
 
-    # --- Adresse principale ---
+    # Adresse principale
     if colmap.get("adresse"):
         out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("")
     elif "Adresse" in df.columns:
@@ -462,10 +467,8 @@ def process_csv_to_df(csv_bytes):
         possible_cols = [c for c in df.columns if "implant" in c.lower()]
         out["Adresse"] = df[possible_cols[0]].astype(str).fillna("") if possible_cols else ""
 
-    # --- Contact MOA ---
     out["Contact MOA"] = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
 
-    # --- Colonnes supplémentaires ---
     extra_cols = [c for c in df.columns if any(k in c.lower() for k in ["implant", "indus", "siège", "siege"])]
     for c in extra_cols:
         out[c] = df[c].astype(str).fillna("")
