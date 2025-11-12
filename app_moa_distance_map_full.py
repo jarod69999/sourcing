@@ -15,7 +15,7 @@ START_ROW = 11                         # 1re ligne de data dans le modèle
 
 PRIMARY = "#0b1d4f"
 BG      = "#f5f0eb"
-st.set_page_config(page_title="MOA – v13.8 (indus + email smart)", page_icon="📍", layout="wide")
+st.set_page_config(page_title="MOA – v2 ", page_icon="📍", layout="wide")
 st.markdown(f"""
 <style>
  .stApp {{background:{BG};font-family:Inter,system-ui,Roboto,Arial;}}
