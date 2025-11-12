@@ -404,79 +404,33 @@ def choose_contact_moa(row, colmap):
     return ""
 
 def process_csv_to_df(csv_bytes):
-    """
-    Lecture intelligente des CSV avec adresses contenant des virgules :
-    - détecte le séparateur dominant (',' ou ';')
-    - si les lignes contiennent des champs non protégés par des guillemets,
-      recompose chaque ligne en les réencapsulant
-    """
     import io, csv
 
-    # Lire tout le texte
-    raw_text = csv_bytes.read().decode("utf-8-sig", errors="ignore")
+    raw = csv_bytes.read().decode("utf-8-sig", errors="ignore").strip()
 
-    # Détection du séparateur dominant
-    count_semicolon = raw_text.count(";")
-    count_comma = raw_text.count(",")
-    sep = ";" if count_semicolon > count_comma else ","
+    # 🔍 Détection du séparateur dominant
+    sample = raw.splitlines()[:20]
+    sep_candidates = [";", ",", "\t"]
+    sep = max(sep_candidates, key=lambda s: sum(line.count(s) for line in sample))
+    
+    # 🧹 Nettoyage : supprime lignes vides / commentaires
+    cleaned_lines = [l for l in raw.splitlines() if l.strip() and not l.strip().startswith("#")]
+    cleaned_text = "\n".join(cleaned_lines)
 
-    # 🧹 Correction des lignes cassées sans guillemets
-    fixed_lines = []
-    for line in raw_text.splitlines():
-        # Si la ligne contient trop de virgules mais pas de guillemets, on encapsule
-        if sep == "," and '"' not in line and line.count(",") > 6:
-            fixed_lines.append(f'"{line}"')
-        else:
-            fixed_lines.append(line)
-    fixed_text = "\n".join(fixed_lines)
+    try:
+        # Essai direct
+        df = pd.read_csv(io.StringIO(cleaned_text), sep=sep, engine="python", on_bad_lines="skip")
+    except Exception as e:
+        st.warning(f"⚠️ CSV instable ({e}). Tentative de secours sans séparateur forcé.")
+        df = pd.read_csv(io.StringIO(cleaned_text), engine="python", on_bad_lines="skip")
 
-    # Lecture avec le bon séparateur
-    df = pd.read_csv(io.StringIO(fixed_text), sep=sep, engine="python")
-    df.columns = [str(c).strip().replace('"', '') for c in df.columns]
-
-    # Nettoyage colonnes
+    # Nettoyage des guillemets
+    df.columns = [c.strip().replace('"', '') for c in df.columns]
     for c in df.columns:
         if df[c].dtype == "object":
             df[c] = df[c].astype(str).str.replace('"', '').str.strip()
 
     st.info(f"✅ Fichier lu avec séparateur '{sep}' — {len(df.columns)} colonnes détectées.")
-
-    # === Ton code existant après ===
-    colmap = _find_columns(df.columns)
-    out = pd.DataFrame()
-    out["Raison sociale"] = (
-        df[colmap.get("raison", "")].astype(str).fillna("")
-        if colmap.get("raison") else df.get("Raison sociale", "")
-    )
-    out["Référent MOA"] = (
-        df[colmap.get("referent", "")].astype(str).fillna("")
-        if colmap.get("referent") else df.get("Référent MOA", "")
-    )
-    out["Catégories"] = (
-        df[colmap.get("categorie", "")].astype(str).fillna("")
-        if colmap.get("categorie") else df.get("Catégories", "")
-    )
-
-    if colmap.get("adresse"):
-        out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("")
-    elif "Adresse" in df.columns:
-        out["Adresse"] = df["Adresse"].astype(str).fillna("")
-    elif "Adresse-du-siège" in df.columns:
-        out["Adresse"] = df["Adresse-du-siège"].astype(str).fillna("")
-    elif "adresse-du-siège" in df.columns:
-        out["Adresse"] = df["adresse-du-siège"].astype(str).fillna("")
-    else:
-        possible_cols = [c for c in df.columns if "implant" in c.lower()]
-        out["Adresse"] = df[possible_cols[0]].astype(str).fillna("") if possible_cols else ""
-
-    out["Contact MOA"] = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
-
-    extra_cols = [c for c in df.columns if any(k in c.lower() for k in ["implant", "indus", "siège", "siege"])]
-    for c in extra_cols:
-        out[c] = df[c].astype(str).fillna("")
-
-    return out
-
 
 
 
