@@ -620,7 +620,7 @@ def compute_distances(df, base_address):
         nom = str(row.get("Raison sociale","")).strip()
         adr = str(row.get("Adresse",""))
 
-       kept_addr, coords, country, cp, dist_pref, _ = pick_site_with_indus_priority(adr, base_coords, row)
+        kept_addr, coords, country, cp, dist_pref, _ = pick_site_with_indus_priority(adr, base_coords, row)
  
         # secours coords si on a un CP/Ville
         if not coords:
