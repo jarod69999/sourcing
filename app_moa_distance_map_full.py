@@ -468,188 +468,103 @@ def process_csv_to_df(csv_bytes):
 
     return out
 
-
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Version consolidée nov 2025 :
-    - Priorité stricte aux implantations industrielles, puis siège, puis fallback
-    - Multi-sites : sélection du site le plus proche du projet
-    - Détection robuste des pays (NL/BE/LU/SK/IT/ES)
-    - Overrides pour entreprises connues
-    - Fallback industriels génériques (ALKERN, etc.)
-    - Corrige Chessy 69380 et Meximieux 01800
-    - Jamais de 'None' en adresse
+    Version stable (févr. 2025)
+    - Priorité aux implantations industrielles
+    - Détection fiable des pays européens
+    - Corrections pour Litobox, CCI Pays-Bas, DZ-Construct, EcoCocon, Porcelanosa
     """
     from geopy.distance import geodesic
     import re
 
     if row is None:
-        return (addr_field or "").strip(), None, "", "", None
+        return addr_field, None, "", None, None, "fallback"
 
-    name = str(row.get("Raison sociale", "") or "").lower()
+    name = str(row.get("Raison sociale", "")).lower()
+    addr_field = str(addr_field or "").strip()
 
-    # --------- Overrides nom → adresse indus fiable ---------
-    NAME_OVERRIDES = {
-        "cci france pays-bas": "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas",
-        "litobox": "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique",
-        "ecococon": "Voderady 91942, Slovaquie",
-        "dz-construct": "195 ZAE Wolser F, L-3290 Bettembourg, Luxembourg",
-        "porcelanosa": "Butech Porcelanosa Offsite - Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne",
-        "gramitherm": "Boulevard de l’Europe 87, 5060 Sambreville, Belgique",
-        "takki": "Rue du Halage 13, 1460 Ittre, Belgique",
-        "easy’go wood": "Rue du Halage 13, 1460 Ittre, Belgique",
-        "easy'go wood": "Rue du Halage 13, 1460 Ittre, Belgique",
-        "retrofitt": "Nieuwlandlaan 39/B224, 3200 Aarschot, Belgique",
-        "vandersanden": "Slakweidestraat 41, 3630 Maasmechelen, Belgique",
+    # Cas particuliers d'entreprises connues
+    if "porcelanosa" in name:
+        addr_field = "Butech Porcelanosa Offsite - Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne"
+        forced_country, forced_cp = "Espagne", "12540"
+    elif "ecococon" in name:
+        addr_field = "Voderady, 919 42, Slovaquie"
+        forced_country, forced_cp = "Slovaquie", "91942"
+    elif "dz-construct" in name or "dz construct" in name:
+        addr_field = "195 ZAE Wolser F, L-3290 Bettembourg, Luxembourg"
+        forced_country, forced_cp = "Luxembourg", "L-3290"
+    elif "litobox" in name:
+        addr_field = "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique"
+        forced_country, forced_cp = "Belgique", "B3570"
+    elif "cci france pays-bas" in name:
+        addr_field = "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas"
+        forced_country, forced_cp = "Pays-Bas", "1101CD"
+    else:
+        forced_country = forced_cp = None
+
+    CITY_HINTS = {
+        "amsterdam": "Pays-Bas", "alken": "Belgique", "bettembourg": "Luxembourg",
+        "voderady": "Slovaquie", "vila-real": "Espagne", "castellon": "Espagne",
+        "vetre": "France", "anzon": "France", "cenon": "France"
     }
-    for k, v in NAME_OVERRIDES.items():
-        if k in name:
-            addr_field = v
-            break
 
-    # --------- Fallback industriels génériques ----------
-    GENERIC_FALLBACKS = {
-        "alkern": "Zone Industrielle, 62400 Béthune, France",
-        "recticel": "Zone Industrielle, 28100 Dreux, France",
-        "knauf": "Usine Knauf, 68700 Cernay, France",
-        "unilin": "Rue de l’Industrie 25, B7700 Mouscron, Belgique",
-        "laude": "1 Rue de l’Europe, 80136 Rivery, France",
-    }
-    for k, v in GENERIC_FALLBACKS.items():
-        if k in name:
-            addr_field = v
-            break
-
-    # --------- Helpers ----------
-    def _normalize(a: str) -> str:
-        a = str(a or "")
-        a = clean_street_numbers(a)  # enlève les "1070", "1200", etc.
-        a = re.sub(r"multi[-\s]*sites?", "", a, flags=re.I)
-        a = re.sub(r"\(.*?\)", "", a)
-        a = re.sub(r"\s{2,}", " ", a).strip(" ,")
-
-        # Chessy (69380) côté Rhône, éviter 77700
-        if re.search(r"\bchessy\b", a, flags=re.I) and "69380" in a and "rhône" not in a.lower():
-            a = re.sub(r"\bchessy\b", "Chessy, Rhône", a, flags=re.I)
-
-        # Meximieux (01800) → éviter confusion avec 1070 Bruxelles
-        if re.search(r"\bmeximieu", a, flags=re.I) and "01800" in a:
-            a = re.sub(r"\b1070\b", "", a)
-
-        return a.strip()
-
-    def _split_multisite(a: str):
-        a = str(a or "")
-        parts = re.split(r"[;\n/]", a)
-        if len(parts) == 1 and "," in parts[0]:
-            parts = re.split(r"(?=,\s*(?:[A-Za-z]{1,2}\d{3,}|L-\d{3,}|ES-\d{4,}|IT-\d{4,}|\d{4,5}\b))", parts[0])
-        return [p.strip(" ,") for p in parts if len(p.strip()) > 5]
-
-    def _coerce_country(addr: str, country: str, cp: str) -> str:
-        s = (addr or "").lower()
-        cp = (cp or "").strip()
-        if re.search(r"\b\d{4}[a-z]{2}\b", s) or re.search(r"\b\d{4}[A-Za-z]{2}\b", cp):   # NL 1101CD
-            return "Pays-Bas"
-        if re.search(r"\bb\d{4}\b", s) or re.match(r"^B\d{4}$", cp, flags=re.I):            # BE
-            return "Belgique"
-        if re.search(r"\bl-\d{3,5}\b", s) or cp.startswith("L-"):                           # LU
+    def _detect_country(addr: str) -> str:
+        s = addr.lower()
+        for k, v in CITY_HINTS.items():
+            if k in s:
+                return v
+        if re.search(r"\b(L-|lux)", s):
             return "Luxembourg"
-        if "voderady" in s or "slovaqu" in s or cp.startswith("SK-"):                       # SK
-            return "Slovaquie"
-        if "vila-real" in s or "castellon" in s or "espa" in s or cp.startswith("ES-"):     # ES
-            return "Espagne"
-        if "bedizzole" in s or "brescia" in s or "ital" in s or cp.startswith("IT-"):       # IT
-            return "Italie"
-        if any(v in s for v in ["alken", "ittre", "sambreville", "maasmechelen", "machelen"]):
+        if re.search(r"\b(B|b)\d{4}", s):
             return "Belgique"
-        if "amsterdam" in s:
+        if re.search(r"\b\d{4}[A-Za-z]{2}\b", s):
             return "Pays-Bas"
-        return country or "France"
+        if re.search(r"\b(SK-|slovaq)", s):
+            return "Slovaquie"
+        if re.search(r"\b(ES-|espagn|vila)", s):
+            return "Espagne"
+        return "France"
 
-    def _geocode_addr(a: str):
-        g = try_geocode_with_fallbacks(a, "France")
+    def _geocode(addr: str):
+        country = forced_country or _detect_country(addr)
+        g = try_geocode_with_fallbacks(addr, country)
         if not g:
             return None
-        lat, lon, country, cp = g
-        country = _coerce_country(a, country, cp)
-        return (a, (lat, lon), country, (cp or "").strip())
+        lat, lon, _, cp = g
+        cp = forced_cp or cp
+        return (addr, (lat, lon), country, cp)
 
-    def _best_of(candidates):
-        """Retourne le site le plus proche du projet."""
-        best = None
-        for a in candidates:
-            gg = _geocode_addr(_normalize(a))
-            if not gg:
-                continue
-            a2, coords, country, cp = gg
-            dist = geodesic(base_coords, coords).km if base_coords else None
-            if not best or (dist is not None and (best[-1] is None or dist < best[-1])):
-                best = (a2, coords, country, cp, dist)
-        return best
-
-    # --------- 1️⃣ implantations industrielles ----------
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
-    indus_candidates = []
-    for c in indus_cols:
-        indus_candidates += _split_multisite(row.get(c, ""))
-    best = _best_of(indus_candidates)
-    if best:
-        return best
-
-    # --------- 2️⃣ siège ----------
     siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
-    siege_candidates = []
+
+    for c in indus_cols:
+        for addr in re.split(r"[;/\n]", str(row[c])):
+            addr = addr.strip()
+            if len(addr) > 8:
+                g = _geocode(addr)
+                if g:
+                    a, coords, country, cp = g
+                    dist = geodesic(base_coords, coords).km if base_coords else None
+                    return a, coords, country, cp, dist, "implant_indus"
+
     for c in siege_cols:
-        siege_candidates += _split_multisite(row.get(c, ""))
-    best = _best_of(siege_candidates)
-    if best:
-        return best
+        for addr in re.split(r"[;/\n]", str(row[c])):
+            addr = addr.strip()
+            if len(addr) > 8:
+                g = _geocode(addr)
+                if g:
+                    a, coords, country, cp = g
+                    dist = geodesic(base_coords, coords).km if base_coords else None
+                    return a, coords, country, cp, dist, "siège"
 
-    # --------- 3️⃣ fallback sur l'adresse générique ----------
-    gg = _geocode_addr(_normalize(addr_field))
-    if gg:
-        a2, coords, country, cp = gg
+    g = _geocode(addr_field)
+    if g:
+        a, coords, country, cp = g
         dist = geodesic(base_coords, coords).km if base_coords else None
-        if not a2 or a2.lower() == "nan":  # jamais vide
-            a2 = f"{cp or ''} {country or ''}".strip()
-        return a2, coords, country, cp, dist
+        return a, coords, country, cp, dist, "fallback"
 
-    # --------- 4️⃣ dernier recours ----------
-    txt = (_normalize(addr_field) or "").strip()
-    if not txt:
-        txt = f"{(row.get('Code postal','') or '').strip()} France".strip()
-    return txt, None, "France", "", None
-
-# ============== MULTI-SITES AVEC PRIORITÉ INDUS =============
-def _split_multi_addresses(addr_field: str):
-    """
-    Découpe souple : virgules, points-virgules, slash, retours ligne.
-    Conserve chaque segment brut.
-    """
-    if not isinstance(addr_field, str) or not addr_field.strip():
-        return []
-    text = _norm(addr_field)
-    parts = re.split(r"[;\n/]", text)
-    flat = []
-    for p in parts:
-        chunks = [c.strip() for c in p.split(",") if c.strip()]
-        if chunks:
-            buf=[]; acc=[]
-            for c in chunks:
-                acc.append(c)
-                joined = ", ".join(acc)
-                if len(acc)>=3 or extract_cp_fallback(joined):
-                    buf.append(joined); acc=[]
-            if acc: buf.append(", ".join(acc))
-            flat.extend(buf)
-    if not flat:
-        flat = [text]
-    seen=set(); out=[]
-    for e in flat:
-        if e not in seen:
-            out.append(e); seen.add(e)
-    return out
- 
+    return addr_field, None, "", None, None, "fallback"
 
 
 
