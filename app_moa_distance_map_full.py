@@ -403,43 +403,46 @@ def choose_contact_moa(row, colmap):
 
     return ""
 
-
 def process_csv_to_df(csv_bytes):
     """
-    Lecture ultra-robuste du CSV :
-    - teste séparateurs ; , \t
-    - choisit celui qui donne le plus de colonnes
-    - gère les encodages et retire les guillemets parasites
+    Lecture intelligente des CSV avec adresses contenant des virgules :
+    - détecte le séparateur dominant (',' ou ';')
+    - si les lignes contiennent des champs non protégés par des guillemets,
+      recompose chaque ligne en les réencapsulant
     """
     import io, csv
 
-    # Convertir le flux en texte brut
-    raw = csv_bytes.read().decode("utf-8-sig", errors="ignore")
-    sample = raw.splitlines()[0]
-    candidates = [";", ",", "\t"]
+    # Lire tout le texte
+    raw_text = csv_bytes.read().decode("utf-8-sig", errors="ignore")
 
-    # Tester quel séparateur donne le plus de colonnes
-    best_sep, max_cols = ",", 0
-    for sep in candidates:
-        cols = next(csv.reader([sample], delimiter=sep))
-        if len(cols) > max_cols:
-            max_cols = len(cols)
-            best_sep = sep
+    # Détection du séparateur dominant
+    count_semicolon = raw_text.count(";")
+    count_comma = raw_text.count(",")
+    sep = ";" if count_semicolon > count_comma else ","
 
-    # Recharge avec le bon séparateur
-    df = pd.read_csv(io.StringIO(raw), sep=best_sep, engine="python")
+    # 🧹 Correction des lignes cassées sans guillemets
+    fixed_lines = []
+    for line in raw_text.splitlines():
+        # Si la ligne contient trop de virgules mais pas de guillemets, on encapsule
+        if sep == "," and '"' not in line and line.count(",") > 6:
+            fixed_lines.append(f'"{line}"')
+        else:
+            fixed_lines.append(line)
+    fixed_text = "\n".join(fixed_lines)
+
+    # Lecture avec le bon séparateur
+    df = pd.read_csv(io.StringIO(fixed_text), sep=sep, engine="python")
     df.columns = [str(c).strip().replace('"', '') for c in df.columns]
 
-    # Nettoyage de base
+    # Nettoyage colonnes
     for c in df.columns:
         if df[c].dtype == "object":
             df[c] = df[c].astype(str).str.replace('"', '').str.strip()
 
-    st.info(f"✅ Fichier lu avec séparateur '{best_sep}' — {len(df.columns)} colonnes détectées.")
+    st.info(f"✅ Fichier lu avec séparateur '{sep}' — {len(df.columns)} colonnes détectées.")
 
-    # === reste de ton code inchangé ===
+    # === Ton code existant après ===
     colmap = _find_columns(df.columns)
-
     out = pd.DataFrame()
     out["Raison sociale"] = (
         df[colmap.get("raison", "")].astype(str).fillna("")
@@ -454,7 +457,6 @@ def process_csv_to_df(csv_bytes):
         if colmap.get("categorie") else df.get("Catégories", "")
     )
 
-    # Adresse principale
     if colmap.get("adresse"):
         out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("")
     elif "Adresse" in df.columns:
@@ -474,6 +476,8 @@ def process_csv_to_df(csv_bytes):
         out[c] = df[c].astype(str).fillna("")
 
     return out
+
+
 
 
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
