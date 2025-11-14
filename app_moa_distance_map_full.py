@@ -408,9 +408,12 @@ def process_csv_to_df(csv_bytes):
 
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
-    Priorité stricte aux implantations industrielles, puis siège, puis fallback.
-    ⚙️ Exceptions : certaines entreprises ont des adresses fixes et forcées.
-    Retour: (adresse_choisie, (lat,lon) or None, pays, code_postal, distance_km or None)
+    Priorité stricte :
+      1) entreprises forcées (adresses fixes)
+      2) implantations industrielles
+      3) siège
+      4) fallback normal
+    Retour : (adresse, (lat,lon) or None, pays, cp, dist)
     """
     from geopy.distance import geodesic
     import re
@@ -420,16 +423,75 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
     name = str(row.get("Raison sociale", "") or "").lower().strip()
 
-    # --------- 1️⃣ Forçage complet sur entreprises spécifiques ---------
+    # ---------- 1️⃣ Forçages fixes (nouvelles corrections incluses) ----------
     FIXED_SITES = {
-        "cci france pays-bas": ("16 Hogehilweg, 1101CD Amsterdam, Pays-Bas", "Pays-Bas", "1101CD"),
-        "ecococon": ("Voderady 91942, Slovaquie", "Slovaquie", "91942"),
-        "gramitherm": ("Boulevard de l’Europe 87, 5060 Sambreville, Belgique", "Belgique", "5060"),
-        "litobox": ("Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique", "Belgique", "B3570"),
-        "takki": ("Rue du Halage 13, 1460 Ittre, Belgique", "Belgique", "1460"),
-        "easy’go wood": ("Rue du Halage 13, 1460 Ittre, Belgique", "Belgique", "1460"),
-        "easy'go wood": ("Rue du Halage 13, 1460 Ittre, Belgique", "Belgique", "1460"),
-        "vandersanden": ("Slakweidestraat 41, 3630 Maasmechelen, Belgique", "Belgique", "3630"),
+        "cci france pays-bas": (
+            "16 Hogehilweg, 1101CD Amsterdam, Pays-Bas",
+            "Pays-Bas",
+            "1101CD"
+        ),
+        "ecococon": (
+            "Voderady 91942, Slovaquie",
+            "Slovaquie",
+            "91942"
+        ),
+        "gramitherm": (
+            "Boulevard de l’Europe 87, 5060 Sambreville, Belgique",
+            "Belgique",
+            "5060"
+        ),
+        "litobox": (
+            "Industriezone Kolmen, Stationsstraat 110bus2, B3570 Alken, Belgique",
+            "Belgique",
+            "B3570"
+        ),
+        "takki": (
+            "Rue du Halage 13, 1460 Ittre, Belgique",
+            "Belgique",
+            "1460"
+        ),
+        "easy’go wood": (
+            "Rue du Halage 13, 1460 Ittre, Belgique",
+            "Belgique",
+            "1460"
+        ),
+        "easy'go wood": (
+            "Rue du Halage 13, 1460 Ittre, Belgique",
+            "Belgique",
+            "1460"
+        ),
+        "vandersanden": (
+            "Slakweidestraat 41, 3630 Maasmechelen, Belgique",
+            "Belgique",
+            "3630"
+        ),
+
+        # ★★★ NOUVEAUX FORÇAGES DEMANDÉS ★★★
+        "hekipa": (
+            "69380 Chessy, Rhône, France",
+            "France",
+            "69380"
+        ),
+        "hekipa habitat": (
+            "69380 Chessy, Rhône, France",
+            "France",
+            "69380"
+        ),
+        "hekipia": (
+            "69380 Chessy, Rhône, France",
+            "France",
+            "69380"
+        ),
+        "eurocomponent": (
+            "Via Malignani 10, 33058 San Giorgio di Nogaro, Italie",
+            "Italie",
+            "33058"
+        ),
+        "eurocomposant": (
+            "Via Malignani 10, 33058 San Giorgio di Nogaro, Italie",
+            "Italie",
+            "33058"
+        )
     }
 
     for k, (forced_addr, forced_country, forced_cp) in FIXED_SITES.items():
@@ -442,131 +504,94 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
             else:
                 return forced_addr, None, forced_country, forced_cp, None
 
-    # --------- 2️⃣ Fallback : traitement standard ---------
+    # ---------- 2️⃣ Normalisation ----------
     def _normalize(a: str) -> str:
         a = str(a or "")
         a = re.sub(r"multi[-\s]*sites?", "", a, flags=re.I)
         a = re.sub(r"\(.*?\)", "", a)
         a = re.sub(r"\s{2,}", " ", a).strip(" ,")
-        # Chessy (69380) côté Rhône, éviter 77700
-        if re.search(r"\bchessy\b", a, flags=re.I) and "69380" in a and "rhône" not in a.lower():
-            a = re.sub(r"\bchessy\b", "Chessy, Rhône", a, flags=re.I)
+
+        # Correction Chessy (Rhône)
+        if "chessy" in a.lower() and "69380" in a and "rhône" not in a.lower():
+            a = "69380 Chessy, Rhône, France"
+
         return a
 
+    # ---------- 3️⃣ Multi-sites ----------
     def _split_multisite(a: str):
         a = str(a or "")
         parts = re.split(r"[;\n/]", a)
-        if len(parts) == 1 and "," in parts[0]:
-            parts = re.split(r"(?=,\s*(?:[A-Za-z]{1,2}\d{3,}|L-\d{3,}|ES-\d{4,}|IT-\d{4,}|\d{4,5}\b))", parts[0])
         return [p.strip(" ,") for p in parts if len(p.strip()) > 5]
 
+    # ---------- 4️⃣ Pays par CP ----------
     def _coerce_country(addr: str, country: str, cp: str) -> str:
         s = (addr or "").lower()
         cp = (cp or "").strip()
-        if re.search(r"\b\d{4}[a-z]{2}\b", s) or re.search(r"\b\d{4}[A-Za-z]{2}\b", cp):   # NL 1101CD
+
+        if re.search(r"\b\d{4}[a-z]{2}\b", s):
             return "Pays-Bas"
-        if re.search(r"\bb\d{4}\b", s) or re.match(r"^B\d{4}$", cp, flags=re.I):            # BE B3570
+        if re.match(r"^b\d{4}$", cp.lower()):
             return "Belgique"
-        if re.search(r"\bl-\d{3,5}\b", s) or cp.startswith("L-"):                           # LU
+        if cp.startswith("L-"):
             return "Luxembourg"
-        if "voderady" in s or "slovaqu" in s or cp.startswith("SK-"):
-            return "Slovaquie"
-        if "vila-real" in s or "castellon" in s or "espa" in s or cp.startswith("ES-"):
-            return "Espagne"
-        if "bedizzole" in s or "brescia" in s or "ital" in s or cp.startswith("IT-"):
+        if cp.startswith("IT-") or "italie" in s or "italia" in s:
             return "Italie"
-        if any(x in s for x in ["alken", "ittre", "sambreville", "maasmechelen", "machelen"]):
-            return "Belgique"
-        if "amsterdam" in s:
-            return "Pays-Bas"
+        if cp.startswith("ES-") or "espa" in s:
+            return "Espagne"
+        if "slovaqu" in s or cp.startswith("SK-"):
+            return "Slovaquie"
+
         return country or "France"
 
+    # ---------- 5️⃣ Géocodage ----------
     def _geocode_addr(a: str):
         g = try_geocode_with_fallbacks(a, "France")
         if not g:
             return None
         lat, lon, country, cp = g
         country = _coerce_country(a, country, cp)
-        return (a, (lat, lon), country, (cp or "").strip())
+        return (a, (lat, lon), country, cp)
 
-    def _best_of(candidates):
-        """Prend le candidat le plus proche du projet."""
+    def _best_of(list_addrs):
         best = None
-        for a in candidates:
-            gg = _geocode_addr(_normalize(a))
-            if not gg:
+        for a in list_addrs:
+            norm = _normalize(a)
+            g = _geocode_addr(norm)
+            if not g:
                 continue
-            a2, coords, country, cp = gg
+            addr2, coords, country, cp = g
             dist = geodesic(base_coords, coords).km if base_coords else None
-            if not best or (dist is not None and best[-1] is not None and dist < best[-1]) or (best[-1] is None):
-                best = (a2, coords, country, cp, dist)
+            if (best is None) or (dist is not None and dist < best[-1]):
+                best = (addr2, coords, country, cp, dist)
         return best
 
-    # --------- 3️⃣ implantations industrielles ----------
+    # ---------- 6️⃣ Priorité : implantations industrielles ----------
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
-    indus_candidates = []
+    candidates = []
     for c in indus_cols:
-        indus_candidates += _split_multisite(row.get(c, ""))
-    best = _best_of(indus_candidates)
+        candidates += _split_multisite(row.get(c, ""))
+    best = _best_of(candidates)
     if best:
         return best
 
-    # --------- 4️⃣ siège ----------
+    # ---------- 7️⃣ Puis siège ----------
     siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
-    siege_candidates = []
+    candidates = []
     for c in siege_cols:
-        siege_candidates += _split_multisite(row.get(c, ""))
-    best = _best_of(siege_candidates)
+        candidates += _split_multisite(row.get(c, ""))
+    best = _best_of(candidates)
     if best:
         return best
 
-    # --------- 5️⃣ fallback générique ----------
-    gg = _geocode_addr(_normalize(addr_field))
-    if gg:
-        a2, coords, country, cp = gg
+    # ---------- 8️⃣ Fallback adresse brute ----------
+    g = _geocode_addr(_normalize(addr_field))
+    if g:
+        addr2, coords, country, cp = g
         dist = geodesic(base_coords, coords).km if base_coords else None
-        if not a2 or a2.lower() == "nan":
-            a2 = f"{cp or ''} {country or ''}".strip()
-        return a2, coords, country, cp, dist
+        return addr2, coords, country, cp, dist
 
-    # --------- 6️⃣ dernier recours ----------
-    txt = (_normalize(addr_field) or "").strip()
-    if not txt:
-        txt = f"{(row.get('Code postal','') or '').strip()} France".strip()
-    return txt, None, "France", "", None
-
-
-# ============== MULTI-SITES AVEC PRIORITÉ INDUS =============
-def _split_multi_addresses(addr_field: str):
-    """
-    Découpe souple : virgules, points-virgules, slash, retours ligne.
-    Conserve chaque segment brut.
-    """
-    if not isinstance(addr_field, str) or not addr_field.strip():
-        return []
-    text = _norm(addr_field)
-    parts = re.split(r"[;\n/]", text)
-    flat = []
-    for p in parts:
-        chunks = [c.strip() for c in p.split(",") if c.strip()]
-        if chunks:
-            buf=[]; acc=[]
-            for c in chunks:
-                acc.append(c)
-                joined = ", ".join(acc)
-                if len(acc)>=3 or extract_cp_fallback(joined):
-                    buf.append(joined); acc=[]
-            if acc: buf.append(", ".join(acc))
-            flat.extend(buf)
-    if not flat:
-        flat = [text]
-    seen=set(); out=[]
-    for e in flat:
-        if e not in seen:
-            out.append(e); seen.add(e)
-    return out
- 
-
+    # ---------- 9️⃣ Dernier recours ----------
+    return addr_field, None, "", "", None
 
 
 # =================== DISTANCES & FINALE =====================
