@@ -708,68 +708,57 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 # =================== DISTANCES & FINALE =====================
 
 def compute_distances(df, base_address):
-    """Adresse du projet (CP+ville ou complète). Toujours géocodable, même avec un code postal seul."""
+    """Adresse du projet (CP seul, CP+ville ou ville). Toujours géocodable."""
+    
     if not base_address.strip():
         st.warning("⚠️ Aucune adresse de référence fournie.")
         return df, None, {}
 
     q = _fix_postcode_spaces(_norm(base_address))
-
-    # --- 🧠 accepte CP seul directement
-    geolocator = Nominatim(user_agent="moa_geo_v16_unified")
     base = None
-    if re.fullmatch(r"\d{5}", q):  # simple code postal ex: "33210"
-        try:
-            loc = geolocator.geocode(f"{q}, France", timeout=12)
-            if loc:
-                base = (loc.latitude, loc.longitude, "France", q)
-                st.info(f"📍 Lieu de référence interprété comme : {q}, France")
-        except Exception as e:
-            print(f"⚠️ geocode CP direct échoué: {e}")
+    
+    # ======================================================
+    # 1) CP SEUL : cas le plus simple et le plus robuste
+    # ======================================================
+    if re.fullmatch(r"\d{5}", q):
+        base = geocode(f"{q}, France")
+        if base:
+            st.info(f"📍 Lieu interprété comme : {q}, France")
 
-    # 1️⃣ premier essai complet (ex : "33210 Langon" ou "Brest")
+    # ======================================================
+    # 2) CP + Ville OU Ville seule
+    # ======================================================
     if not base:
-        q_base = q if has_explicit_country(q) else f"{q}, France"
-        base = geocode(q_base)
+        base = geocode(q)
+        if base:
+            st.info(f"📍 Lieu interprété comme : {q}")
 
-    # 2️⃣ fallback : si rien trouvé → détection automatique par CP/Ville
+    # ======================================================
+    # 3) Tentative extract_cp_city si échec
+    # ======================================================
     if not base:
         cp, ville = extract_cp_city(q)
-        if not cp and re.fullmatch(r"\d{5}", q):
-            cp = q
 
-        CP_HINTS = {
-            "33210": "Langon, Gironde",
-            "69380": "Chessy, Rhône",
-            "29200": "Brest",
-            "44000": "Nantes",
-            "75018": "Paris 18e",
-            "33000": "Bordeaux",
-            "69000": "Lyon",
-        }
+        if cp and ville:
+            base = geocode(f"{cp} {ville}, France")
+            if base:
+                st.info(f"ℹ️ Lieu interprété comme : {cp} {ville}, France")
 
-        if q in CP_HINTS:
-            base_hint = f"{CP_HINTS[q]}, France"
-        elif cp and not ville:
-            base_hint = f"{cp}, France"
-        elif cp and ville:
-            base_hint = f"{cp} {ville}, France"
-        else:
-            base_hint = f"{q}, France"
+        elif cp:
+            base = geocode(f"{cp}, France")
+            if base:
+                st.info(f"ℹ️ Lieu interprété comme : {cp}, France")
 
-        base = geocode(base_hint)
-
-        # 🔁 dernière chance : juste la ville
-        if not base and ville:
+        elif ville:
             base = geocode(f"{ville}, France")
+            if base:
+                st.info(f"ℹ️ Lieu interprété comme : {ville}, France")
 
-        if base:
-            st.info(f"ℹ️ Lieu de référence interprété comme : {base_hint}")
-
-    # 3️⃣ si toujours rien → erreur propre (sans bloquer)
+    # ======================================================
+    # 4) Erreur propre si tout échoue
+    # ======================================================
     if not base:
-        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'. "
-                   f"👉 Vérifie simplement le code postal ou ajoute une ville.")
+        st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'.")
         df2 = df.copy()
         df2["Pays"] = ""
         df2["Code postal"] = df2["Adresse"].apply(extract_cp_fallback)
@@ -778,62 +767,44 @@ def compute_distances(df, base_address):
         df2["Fiabilité géocode"] = ""
         return df2, None, {}
 
-    # ✅ Base trouvée
+    # ======================================================
+    # 5) Base trouvée → lancer les distances
+    # ======================================================
     base_coords = (base[0], base[1])
-    chosen_coords, chosen_rows = {}, []
+    chosen_coords = {}
+    chosen_rows = []
 
     for _, row in df.iterrows():
         name = str(row.get("Raison sociale", "")).strip()
         adresse = str(row.get("Adresse", ""))
 
-        # ✅ correction : fonction renvoie 5 valeurs, pas 6
         kept_addr, coords, country, cp, best_dist = pick_site_with_indus_priority(
             adresse, base_coords, row
         )
-        source_addr = "indus"
 
-        # tentative secours CP+Ville
-        if not coords:
-            cpe, villee = extract_cp_city(kept_addr)
-            if cpe or villee:
-                g = geocode(f"{cpe} {villee}".strip() + ("" if has_explicit_country(kept_addr) else ", France"))
-                if g:
-                    coords = (g[0], g[1])
-                    if not country:
-                        country = g[2] or ("France" if not has_explicit_country(kept_addr) else "")
-                    if not cp:
-                        cp = g[3] or cpe
-
-        # calcul de distance
         if coords:
             dist, dist_type = distance_km(base_coords, coords)
         else:
-            dist = round(best_dist) if best_dist is not None else None
+            dist = round(best_dist) if best_dist else None
             dist_type = ""
 
-        # jamais d'adresse vide dans l'export
-        if not kept_addr or str(kept_addr).lower() == "nan":
-            kept_addr = f"{cp or ''} {country or ''}".strip() or (row.get("Adresse", "") or "")
+        if coords:
+            chosen_coords[name] = (coords[0], coords[1], country)
 
         chosen_rows.append({
             "Raison sociale": name,
-            "Pays": country or "",
+            "Pays": country,
             "Adresse": kept_addr,
-            "Code postal": cp or "",
+            "Code postal": cp,
             "Distance au projet": dist,
             "Catégories": row.get("Catégories", ""),
             "Référent MOA": row.get("Référent MOA", ""),
             "Contact MOA": row.get("Contact MOA", ""),
             "Type de distance": dist_type,
-            "Fiabilité géocode": source_addr,
+            "Fiabilité géocode": "indus",
         })
 
-        if coords:
-            chosen_coords[name] = (coords[0], coords[1], country or "")
-
-    out = pd.DataFrame(chosen_rows)
-    return out, base_coords, chosen_coords
-
+    return pd.DataFrame(chosen_rows), base_coords, chosen_coords
 
 
 # ========================= EXCEL ============================
