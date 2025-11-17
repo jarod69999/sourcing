@@ -545,25 +545,36 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
     # ---------- 5️⃣ Géocodage ----------
     def _geocode_addr(a: str):
-        g = try_geocode_with_fallbacks(a, "France")
-        if not g:
-            return None
-        lat, lon, country, cp = g
-        country = _coerce_country(a, country, cp)
-        return (a, (lat, lon), country, cp)
+    """
+    Géocode clé : ne modifie JAMAIS les adresses étrangères.
+    Ne rajoute pas ', France' quand le pays est déjà connu.
+    Ne nettoie pas les suffixes utiles comme 'BE', 'NL', 'B3570', '1101CD', etc.
+    """
+    raw = a.strip()
 
-    def _best_of(list_addrs):
-        best = None
-        for a in list_addrs:
-            norm = _normalize(a)
-            g = _geocode_addr(norm)
-            if not g:
-                continue
-            addr2, coords, country, cp = g
-            dist = geodesic(base_coords, coords).km if base_coords else None
-            if (best is None) or (dist is not None and dist < best[-1]):
-                best = (addr2, coords, country, cp, dist)
-        return best
+    # détecte si l'adresse est étrangère
+    foreign = any(
+        k in raw.lower()
+        for k in [
+            "pays-bas","amsterdam","nl","belg","b357","ittre","alken","sambreville",
+            "slovaqu","voderady","luxemb","l-","ital","san giorgio","espa","vila-real"
+        ]
+    )
+
+    # si étrangère → géocode EXACTEMENT le texte brut
+    if foreign:
+        g = try_geocode_with_fallbacks(raw, assumed_country_hint="")
+    else:
+        g = try_geocode_with_fallbacks(raw, "France")
+
+    if not g:
+        return None
+
+    lat, lon, country, cp = g
+    country = _coerce_country(raw, country, cp)
+
+    return (raw, (lat, lon), country, cp)
+
 
     # ---------- 6️⃣ Priorité : implantations industrielles ----------
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
