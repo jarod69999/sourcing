@@ -29,7 +29,8 @@ st.markdown(f"""
 # ====================== GEO & HELPERS =======================
 COUNTRY_WORDS = {
     "france","belgique","belgium","belgie","belgië","espagne","españa","portugal",
-    "italie","italia","deutschland","germany","suisse","switzerland","luxembourg"
+    "italie","italia","deutschland","germany","suisse","switzerland","luxembourg",
+    "pays-bas","pays bas","netherlands","nederland"
 }
 CP_FALLBACK_RE = re.compile(r"\b\d{4,6}\b")
 EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
