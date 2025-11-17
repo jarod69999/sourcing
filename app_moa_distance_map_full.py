@@ -509,44 +509,30 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
     name = str(row.get("Raison sociale", "") or "").lower().strip()
 
     # ---------------------------------------------------------------------
-    # 🔒 VALIDATION ADRESSES (évite les CP seuls, floats, fake adresses)
+    # VALIDATION ADRESSES
     # ---------------------------------------------------------------------
     def _is_valid_address(a):
         if not isinstance(a, str):
             return False
-
         a = a.strip()
         if a in ["", "nan"]:
             return False
-
-        # float -> "69330.0"
         if re.fullmatch(r"\d{5}\.0", a):
             return False
-
-        # CP FR seul
-        if re.fullmatch(r"\d{5}", a):
+        if re.fullmatch(r"\d{5}", a):  # CP FR seul
             return False
-
-        # CP NL "1234AB"
-        if re.fullmatch(r"\d{4}[A-Za-z]{2}", a):
+        if re.fullmatch(r"\d{4}[A-Za-z]{2}", a):  # NL
             return False
-
-        # CP BE "B3570"
-        if re.fullmatch(r"[Bb]\d{4}", a):
+        if re.fullmatch(r"[Bb]\d{4}", a):  # BE Bxxxx
             return False
-
-        # CP LU "L-3290"
-        if re.fullmatch(r"[Ll]-\d{4,5}", a):
+        if re.fullmatch(r"[Ll]-\d{4,5}", a):  # LU
             return False
-
-        # nombre seul
-        if re.fullmatch(r"\d+", a):
+        if re.fullmatch(r"\d+", a):  # nombre seul
             return False
-
         return True
 
     # ---------------------------------------------------------------------
-    # 🔒 FIXED SITES (forçages manuels)
+    # FIXED SITES
     # ---------------------------------------------------------------------
     FIXED_SITES = {
         "cci france pays-bas": ("16 Hogehilweg, 1101CD Amsterdam, Pays-Bas", "Pays-Bas", "1101CD"),
@@ -582,11 +568,8 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
         a = re.sub(r"multi[-\s]*sites?", "", a, flags=re.I)
         a = re.sub(r"\(.*?\)", "", a)
         a = re.sub(r"\s{2,}", " ", a).strip(" ,")
-
-        # Correction automatique Chessy Rhône
         if "chessy" in a.lower() and "69380" in a and "rhône" not in a.lower():
             a = "69380 Chessy, Rhône, France"
-
         return a
 
     # ---------------------------------------------------------------------
@@ -601,33 +584,16 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
     # ---------------------------------------------------------------------
     def _coerce_country(addr, country, cp):
         s = addr.lower()
-        cp = cp.strip()
-
-        # 🇳🇱 PAYS-BAS
-        if re.fullmatch(r"\d{4}[a-z]{2}", cp.lower()):
-            return "Pays-Bas"
-
-        # 🇧🇪 BELGIQUE
         if cp.lower().startswith("b") and cp[1:].isdigit():
             return "Belgique"
-        if cp.isdigit() and 1000 <= int(cp) <= 9999 and (
-            "belg" in s or "aarschot" in s or "alken" in s
-        ):
-            return "Belgique"
-
-        # 🇱🇺 LUXEMBOURG
+        if re.fullmatch(r"\d{4}[a-z]{2}", cp.lower()):
+            return "Pays-Bas"
         if cp.startswith("L-"):
             return "Luxembourg"
-
-        # 🇪🇸 ESPAGNE (Vila-real)
-        if "vila-real" in s or "vilareal" in s or cp == "12540":
+        if "vila-real" in s or cp == "12540":
             return "Espagne"
-
-        # 🇮🇹 ITALIE
         if "ital" in s:
             return "Italie"
-
-        # 🇫🇷 FRANCE fallback
         return country or "France"
 
     # ---------------------------------------------------------------------
@@ -651,47 +617,34 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
             g = _geocode_addr(norm)
             if not g:
                 continue
-
             addr2, coords, country, cp = g
             dist = geodesic(base_coords, coords).km
-
-            # Patch Espagne CP 12540
             if country == "Espagne":
                 cp = "12540"
-
             cand = (addr2, coords, country, cp, dist)
             if best is None or dist < best[-1]:
                 best = cand
-
         return best
 
-    # ---------------------------------------------------------------------
-    # 1) IMPLANTATIONS INDUSTRIELLES
-    # ---------------------------------------------------------------------
+    # 1) IMPLANTATIONS
     indus_cols = [c for c in row.index if "implant" in c.lower() and "indus" in c.lower()]
-    indus_candidates = []
+    indus_list = []
     for c in indus_cols:
-        indus_candidates += _split_multisite(row[c])
-
-    best = _best_of(indus_candidates)
+        indus_list += _split_multisite(row[c])
+    best = _best_of(indus_list)
     if best:
         return best
 
-    # ---------------------------------------------------------------------
     # 2) SIÈGE
-    # ---------------------------------------------------------------------
     siege_cols = [c for c in row.index if "siège" in c.lower() or "siege" in c.lower()]
-    siege_candidates = []
+    siege_list = []
     for c in siege_cols:
-        siege_candidates += _split_multisite(row[c])
-
-    best = _best_of(siege_candidates)
+        siege_list += _split_multisite(row[c])
+    best = _best_of(siege_list)
     if best:
         return best
 
-    # ---------------------------------------------------------------------
     # 3) ADRESSE PRINCIPALE
-    # ---------------------------------------------------------------------
     norm = _normalize(addr_field)
     g = _geocode_addr(norm)
     if g:
@@ -699,26 +652,25 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
         dist = geodesic(base_coords, coords).km
         return addr2, coords, country, cp, dist
 
-    # ---------------------------------------------------------------------
-    # 4) FAILSAFE
-    # ---------------------------------------------------------------------
     return addr_field, None, "", "", None
 
 
 # =================== DISTANCES & FINALE =====================
-
 def compute_distances(df, base_address):
-    """Adresse du projet (CP seul, CP+ville ou ville). Toujours géocodable."""
-    
+    """
+    Adresse du projet : CP seul, CP+Ville, Ville ou adresse complète.
+    Toujours géocodable via fallback solide.
+    """
+
     if not base_address.strip():
         st.warning("⚠️ Aucune adresse de référence fournie.")
         return df, None, {}
 
     q = _fix_postcode_spaces(_norm(base_address))
     base = None
-    
+
     # ======================================================
-    # 1) CP SEUL : cas le plus simple et le plus robuste
+    # 1) CAS LE PLUS SIMPLE : CP seul → toujours accepté
     # ======================================================
     if re.fullmatch(r"\d{5}", q):
         base = geocode(f"{q}, France")
@@ -734,28 +686,23 @@ def compute_distances(df, base_address):
             st.info(f"📍 Lieu interprété comme : {q}")
 
     # ======================================================
-    # 3) Tentative extract_cp_city si échec
+    # 3) Fallback automatique CP/Ville
     # ======================================================
     if not base:
         cp, ville = extract_cp_city(q)
 
         if cp and ville:
             base = geocode(f"{cp} {ville}, France")
-            if base:
-                st.info(f"ℹ️ Lieu interprété comme : {cp} {ville}, France")
-
         elif cp:
             base = geocode(f"{cp}, France")
-            if base:
-                st.info(f"ℹ️ Lieu interprété comme : {cp}, France")
-
         elif ville:
             base = geocode(f"{ville}, France")
-            if base:
-                st.info(f"ℹ️ Lieu interprété comme : {ville}, France")
+
+        if base:
+            st.info(f"ℹ️ Lieu interprété comme fallback : {cp or ''} {ville or ''}".strip())
 
     # ======================================================
-    # 4) Erreur propre si tout échoue
+    # 4) ERREUR SI RIEN
     # ======================================================
     if not base:
         st.warning(f"⚠️ Lieu de référence non géocodable : '{base_address}'.")
@@ -768,7 +715,7 @@ def compute_distances(df, base_address):
         return df2, None, {}
 
     # ======================================================
-    # 5) Base trouvée → lancer les distances
+    # 5) BASE OK → lancement distances
     # ======================================================
     base_coords = (base[0], base[1])
     chosen_coords = {}
