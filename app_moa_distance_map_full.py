@@ -543,8 +543,8 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
         return country or "France"
 
-    # ---------- 5️⃣ Géocodage ----------
-    def _geocode_addr(a: str):
+   # ---------- 5️⃣ Géocodage ----------
+   def _geocode_addr(a: str):
     """
     Géocode clé : ne modifie JAMAIS les adresses étrangères.
     Ne rajoute pas ', France' quand le pays est déjà connu.
