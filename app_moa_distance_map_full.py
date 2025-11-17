@@ -474,6 +474,9 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
         "eurocomponent": ("Via Malignani 10, 33058 San Giorgio di Nogaro, Italie", "Italie", "33058"),
         "eurocomposant": ("Via Malignani 10, 33058 San Giorgio di Nogaro, Italie", "Italie", "33058"),
         "retrofitt": ("Nieuwlandlaan 39/B224, 3200 Aarschot, Belgique", "Belgique", "3200"),
+        "porcelanosa": (  "Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne", "Espagne","12540"),
+        "butech porcelanosa": ("Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne",  "Espagne","12540"),
+        "butech": ( "Carretera Nacional 340, km 55,8, 12540 Vila-real, Espagne",  "Espagne",  "12540"),   
     }
 
     # --- Apply fixed site override ---
@@ -519,7 +522,7 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
             return "Luxembourg"
         if "slovaqu" in s or cp.startswith("SK-"):
             return "Slovaquie"
-        if "vila-real" in s or cp.startswith("ES-"):
+        if "vila-real" in s or "vilareal" in s or "castelló" in s or "castellon" in s:
             return "Espagne"
         if "ital" in s or cp.startswith("IT-"):
             return "Italie"
@@ -547,6 +550,11 @@ def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, flo
 
             if best is None or (dist is not None and dist < best[-1]):
                 best = (addr2, coords, country, cp, dist)
+
+     # Correction CP Espagne si Vila-real détecté
+            if country == "Espagne":
+                if "vila-real" in addr2.lower() or "12540" in addr2:
+                    cp = "12540"
 
         return best
 
