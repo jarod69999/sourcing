@@ -813,6 +813,44 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
+# ===============================================================
+# STYLE GLOBAL : toujours fond blanc + texte noir (même en mode sombre)
+# ===============================================================
+st.markdown("""
+<style>
+
+@media (prefers-color-scheme: dark) {
+    html, body, .stApp {
+        background: #FFFFFF !important;
+        color: #000000 !important;
+    }
+    h1, h2, h3, h4, h5, h6, label, p, span, div {
+        color: #000000 !important;
+    }
+    .stRadio label div p {
+        color: #000000 !important;
+    }
+    .stTextInput label, .stFileUploader label div {
+        color: #000000 !important;
+    }
+    .stDownloadButton > button {
+        background: #0b1d4f !important;
+        color: #FFFFFF !important;
+    }
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+# ===============================================================
+# APP
+# ===============================================================
+st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
+st.image("Conseil-noir.jpg", width=220)
+
+
+
+
 st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
 st.image("Conseil-noir.jpg", width=220)
 
