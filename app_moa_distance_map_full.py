@@ -849,11 +849,6 @@ st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
 st.image("Conseil-noir.jpg", width=220)
 
 
-
-
-st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
-st.image("Conseil-noir.jpg", width=220)
-
 mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
 base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)",
                              placeholder="Ex : 33210 Langon  •  ou  17 Boulevard Allende 33210 Langon")
