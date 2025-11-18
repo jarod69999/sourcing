@@ -16,6 +16,20 @@ START_ROW = 11                         # 1re ligne de data dans le modèle
 PRIMARY = "#0b1d4f"
 BG      = "#f5f0eb"
 st.set_page_config(page_title="MOA – v2 ", page_icon="📍", layout="wide")
+# ===============================================================
+# KEEP ALIVE – empêche l'app de se mettre en sommeil (ping interne)
+# ===============================================================
+keepalive_js = """
+<script>
+    function keepAlive() {
+        fetch("/_stcore/health", {method:"GET"});
+    }
+    setInterval(keepAlive, 300000);  // 300 000 ms = 5 minutes
+</script>
+"""
+import streamlit as st
+st.markdown(keepalive_js, unsafe_allow_html=True)
+
 st.markdown(f"""
 <style>
  .stApp {{background:{BG};font-family:Inter,system-ui,Roboto,Arial;}}
@@ -813,6 +827,14 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
+st.markdown("""
+<style>
+.stApp {
+    background: #F7F7F7 !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ===============================================================
 # STYLE GLOBAL : toujours fond blanc + texte noir (même en mode sombre)
 # ===============================================================
@@ -845,6 +867,59 @@ st.markdown("""
 # ===============================================================
 # APP
 # ===============================================================
+# ===============================================================
+# CSS PREMIUM – thème clair forcé + design modernisé
+# ===============================================================
+st.markdown("""
+<style>
+
+/* Empêche le mode sombre : tout repasse en clair */
+@media (prefers-color-scheme: dark) {
+    html, body, .stApp {
+        background: #ffffff !important;
+        color: #000000 !important;
+    }
+}
+
+/* Titres */
+h1, h2, h3, h4, h5, h6 {
+    color: #0B1D4F !important;
+    font-family: "Inter", sans-serif !important;
+    font-weight: 700 !important;
+}
+
+/* Labels, textes, paragraphs */
+label, p, span, div, textarea, input {
+    color: #000000 !important;
+    font-family: "Inter", sans-serif !important;
+}
+/* Boutons (modernisés) */
+.stButton>button, .stDownloadButton>button {
+    background: #0B1D4F !important;
+    color: #ffffff !important;
+    border-radius: 8px !important;
+    padding: 0.5rem 1.2rem !important;
+    border: none !important;
+    font-weight: 600 !important;
+}
+/* Inputs blancs toujours lisibles */
+.stTextInput>div>div>input,
+.stFileUploader>div>div {
+    background-color: #ffffff !important;
+    color: #000000 !important;
+}
+/* Radio horizontale moderne */
+.stRadio > div {
+    flex-direction: row !important;
+    gap: 20px !important;
+}
+
+/* DataFrame : colonnes plus lisibles */
+[data-testid="stDataFrame"] {
+    color: black !important;
+}
+</style>
+""", unsafe_allow_html=True)
 st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
 st.image("Conseil-noir.jpg", width=220)
 
