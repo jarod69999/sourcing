@@ -55,10 +55,6 @@ HQ_TOKEN     = "adresse-du-siège"
 import requests
 
 # ================== VERIFICATION CLE ORS ==================
-st.image("Conseil-noir.jpg", caption="MOA – Hors Site Conseil", use_column_width=False, width=220)
-
-
-
 
 def ors_distance(coord1, coord2, ors_key=""):
     """
@@ -896,12 +892,17 @@ label, p, span, div, textarea, input {
 /* Boutons (modernisés) */
 .stButton>button, .stDownloadButton>button {
     background: #0B1D4F !important;
-    color: #ffffff !important;
+    color: #FFFFFF !important;          /* FORCE texte blanc */
     border-radius: 8px !important;
     padding: 0.5rem 1.2rem !important;
     border: none !important;
     font-weight: 600 !important;
 }
+
+/* Texte interne blanc même en hover */
+.stButton>button:hover, .stDownloadButton>button:hover {
+    color: #FFFFFF !important;
+    opacity: 0.85 !important;
 /* Inputs blancs toujours lisibles */
 .stTextInput>div>div>input,
 .stFileUploader>div>div {
@@ -920,7 +921,7 @@ label, p, span, div, textarea, input {
 }
 </style>
 """, unsafe_allow_html=True)
-st.title("📍Sortie excel on peut remercier Jarod le plus beau ")
+st.title("📍Sortie excel, Contacter JAROD en cas de problème")
 st.image("Conseil-noir.jpg", width=220)
 
 
