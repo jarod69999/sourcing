@@ -824,108 +824,102 @@ def map_to_html(fmap):
 
 # ======================== INTERFACE =========================
 st.markdown("""
+
 <style>
-.stApp {
-    background: #F7F7F7 !important;
+
+/* ================================
+      THEME CLAIR FORCÉ
+================================ */
+html, body, .stApp {
+    background: #FFFFFF !important;
+    color: #000000 !important;
 }
-</style>
-""", unsafe_allow_html=True)
 
-# ===============================================================
-# STYLE GLOBAL : toujours fond blanc + texte noir (même en mode sombre)
-# ===============================================================
-st.markdown("""
-<style>
-
+/* Désactivation totale du mode sombre */
 @media (prefers-color-scheme: dark) {
     html, body, .stApp {
         background: #FFFFFF !important;
         color: #000000 !important;
     }
-    h1, h2, h3, h4, h5, h6, label, p, span, div {
-        color: #000000 !important;
-    }
-    .stRadio label div p {
-        color: #000000 !important;
-    }
-    .stTextInput label, .stFileUploader label div {
-        color: #000000 !important;
-    }
-    .stDownloadButton > button {
-        background: #0b1d4f !important;
-        color: #FFFFFF !important;
-    }
 }
 
-</style>
-""", unsafe_allow_html=True)
-
-# ===============================================================
-# APP
-# ===============================================================
-# ===============================================================
-# CSS PREMIUM – thème clair forcé + design modernisé
-# ===============================================================
-st.markdown("""
-<style>
-
-/* Empêche le mode sombre */
-@media (prefers-color-scheme: dark) {
-    html, body, .stApp {
-        background: #ffffff !important;
-        color: #000000 !important;
-    }
-}
-
-/* Titres */
+/* ================================
+      TITRES - TEXTES
+================================ */
 h1, h2, h3, h4, h5, h6 {
     color: #0B1D4F !important;
     font-family: "Inter", sans-serif !important;
     font-weight: 700 !important;
 }
 
-/* Labels, textes */
 label, p, span, div, textarea, input {
     color: #000000 !important;
     font-family: "Inter", sans-serif !important;
 }
 
-/* Boutons */
-.stButton>button, .stDownloadButton>button {
-    background: #0B1D4F !important;
-    color: #FFFFFF !important;
+/* ================================
+      BOUTONS (STYLE MODERNE)
+================================ */
+.stButton>button,
+.stDownloadButton>button {
+    background: #0B1D4F !important;     /* Bleu foncé */
+    color: #FFFFFF !important;          /* Texte blanc */
     border-radius: 8px !important;
     padding: 0.5rem 1.2rem !important;
     border: none !important;
     font-weight: 600 !important;
 }
 
-/* Hover : il manquait cette accolade ! */
-.stButton>button:hover, .stDownloadButton>button:hover {
-    color: #FFFFFF !important;
+/* Hover */
+.stButton>button:hover,
+.stDownloadButton>button:hover {
     opacity: 0.85 !important;
+    color: #FFFFFF !important;
 }
 
-/* Inputs */
+/* Correction Streamlit : texte interne dans un <p> → forcer blanc */
+.stButton button *,
+.stDownloadButton button * {
+    color: #FFFFFF !important;
+}
+
+.stButton button p,
+.stDownloadButton button p {
+    color: #FFFFFF !important;
+}
+
+/* ================================
+      INPUTS / FILE UPLOAD
+================================ */
 .stTextInput>div>div>input,
 .stFileUploader>div>div {
     background-color: #ffffff !important;
     color: #000000 !important;
 }
 
-/* Radio horizontale */
+/* ================================
+      RADIOS HORIZONTALES
+================================ */
 .stRadio > div {
     flex-direction: row !important;
     gap: 20px !important;
 }
 
-/* DataFrame */
+/* ================================
+      DATAFRAME
+================================ */
 [data-testid="stDataFrame"] {
     color: black !important;
 }
 
 </style>
+
 """, unsafe_allow_html=True)
+
+# ===============================================================
+# APP
+# ===============================================================
+
 
 
 st.title("📍Sortie excel, Contacter JAROD en cas de problème")
