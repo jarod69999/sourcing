@@ -869,7 +869,7 @@ st.markdown("""
 st.markdown("""
 <style>
 
-/* Empêche le mode sombre : tout repasse en clair */
+/* Empêche le mode sombre */
 @media (prefers-color-scheme: dark) {
     html, body, .stApp {
         background: #ffffff !important;
@@ -884,15 +884,14 @@ h1, h2, h3, h4, h5, h6 {
     font-weight: 700 !important;
 }
 
-/* Labels, textes, paragraphs */
+/* Labels, textes */
 label, p, span, div, textarea, input {
     color: #000000 !important;
     font-family: "Inter", sans-serif !important;
 }
 
-/* Boutons (modernisés) */
-.stButton>button, 
-.stDownloadButton>button {
+/* Boutons */
+.stButton>button, .stDownloadButton>button {
     background: #0B1D4F !important;
     color: #FFFFFF !important;
     border-radius: 8px !important;
@@ -901,21 +900,20 @@ label, p, span, div, textarea, input {
     font-weight: 600 !important;
 }
 
-/* Hover bouton — ICI il manquait la } */
-.stButton>button:hover, 
-.stDownloadButton>button:hover {
+/* Hover : il manquait cette accolade ! */
+.stButton>button:hover, .stDownloadButton>button:hover {
     color: #FFFFFF !important;
     opacity: 0.85 !important;
-}   /* ← ACCOLADE MANQUANTE QUI CASSAIT TOUT */
+}
 
-/* Inputs blancs toujours lisibles */
+/* Inputs */
 .stTextInput>div>div>input,
 .stFileUploader>div>div {
     background-color: #ffffff !important;
     color: #000000 !important;
 }
 
-/* Radio horizontale moderne */
+/* Radio horizontale */
 .stRadio > div {
     flex-direction: row !important;
     gap: 20px !important;
@@ -928,6 +926,7 @@ label, p, span, div, textarea, input {
 
 </style>
 """, unsafe_allow_html=True)
+
 
 st.title("📍Sortie excel, Contacter JAROD en cas de problème")
 st.image("Conseil-noir.jpg", width=220)
