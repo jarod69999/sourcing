@@ -889,38 +889,46 @@ label, p, span, div, textarea, input {
     color: #000000 !important;
     font-family: "Inter", sans-serif !important;
 }
+
 /* Boutons (modernisés) */
-.stButton>button, .stDownloadButton>button {
+.stButton>button, 
+.stDownloadButton>button {
     background: #0B1D4F !important;
-    color: #FFFFFF !important;          /* FORCE texte blanc */
+    color: #FFFFFF !important;
     border-radius: 8px !important;
     padding: 0.5rem 1.2rem !important;
     border: none !important;
     font-weight: 600 !important;
 }
 
-/* Texte interne blanc même en hover */
-.stButton>button:hover, .stDownloadButton>button:hover {
+/* Hover bouton — ICI il manquait la } */
+.stButton>button:hover, 
+.stDownloadButton>button:hover {
     color: #FFFFFF !important;
     opacity: 0.85 !important;
+}   /* ← ACCOLADE MANQUANTE QUI CASSAIT TOUT */
+
 /* Inputs blancs toujours lisibles */
 .stTextInput>div>div>input,
 .stFileUploader>div>div {
     background-color: #ffffff !important;
     color: #000000 !important;
 }
+
 /* Radio horizontale moderne */
 .stRadio > div {
     flex-direction: row !important;
     gap: 20px !important;
 }
 
-/* DataFrame : colonnes plus lisibles */
+/* DataFrame */
 [data-testid="stDataFrame"] {
     color: black !important;
 }
+
 </style>
 """, unsafe_allow_html=True)
+
 st.title("📍Sortie excel, Contacter JAROD en cas de problème")
 st.image("Conseil-noir.jpg", width=220)
 
