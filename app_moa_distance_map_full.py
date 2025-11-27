@@ -785,12 +785,39 @@ def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
         ws.cell(i,9, r.get("Type de distance",""))
     bio = BytesIO(); wb.save(bio); bio.seek(0); return bio
 
-def to_simple(df):
-    """Contact simple : Raison sociale / Référent MOA / Contact MOA / Catégories"""
+def to_simple(df, template="doc_base_contact_simple.xlsx", start=11):
+    """
+    Génère le fichier 'contact simple' dans le modèle :
+    Colonnes :
+      A = Raison sociale
+      B = Référent MOA
+      C = Contact MOA
+      D = Catégories
+    Les lignes commencent à start (=11).
+    """
+
+    # ouverture modèle
+    wb = load_workbook(template)
+    ws = wb.active
+
+    # on efface d'anciennes valeurs
+    for r in range(start, ws.max_row + 1):
+        for c in range(1, 5):
+            ws.cell(r, c).value = None
+
+    # remplissage
+    for i, (_, row) in enumerate(df.iterrows(), start=start):
+        ws.cell(i, 1, row.get("Raison sociale", ""))
+        ws.cell(i, 2, row.get("Référent MOA", ""))
+        ws.cell(i, 3, row.get("Contact MOA", ""))
+        ws.cell(i, 4, row.get("Catégories", ""))
+
+    # export
     bio = BytesIO()
-    cols = [c for c in ["Raison sociale","Référent MOA","Contact MOA","Catégories"] if c in df.columns]
-    df[cols].to_excel(bio, index=False)
-    bio.seek(0); return bio
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
 
 # ===================== CARTE (Folium) =======================
 def make_map(df, base_coords, coords_dict, base_address):
@@ -952,10 +979,10 @@ if file and (mode == "🧾 Mode simple" or base_address):
         st.success("✅ Traitement terminé")
 
         # contact simple
-        x1 = to_simple(base_df)
+        x1 = to_simple(base_df, template="doc_base_contact_simple.xlsx", start=11)
         st.download_button("⬇️ Télécharger le contact simple",
-                           data=x1, file_name=f"{name_simple}.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                   data=x1, file_name=f"{name_simple}.xlsx",
+                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         if mode == "🚗 Mode enrichi (distances + carte)":
             # Excel complet
