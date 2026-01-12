@@ -228,7 +228,7 @@ def geocode(query: str):
     # Si un pays est déjà écrit dans l’adresse, on ne rajoute rien
     query_full = q if has_explicit_country(q) else f"{q}, {country_hint}"
 
-    geolocator = Nominatim(user_agent="moa_geo_v20")
+    geolocator = Nominatim(user_agent=MY_USER_AGENT)
     try:
         time.sleep(1)
         loc = geolocator.geocode(query_full, timeout=20, addressdetails=True)
