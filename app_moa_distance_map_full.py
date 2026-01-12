@@ -148,7 +148,7 @@ def geocode(query: str):
     - Affichage de l'erreur réelle en cas d'échec
     """
     # ⚠️ REMPLACE CECI PAR TON EMAIL PRO POUR NE PLUS JAMAIS ETRE BLOQUÉ
-    MY_USER_AGENT = "app_sourcing_contact_at_mondomaine_com" 
+    MY_USER_AGENT = "app_sourcing_jarod6999" 
 
     if not query or not isinstance(query, str):
         return None
