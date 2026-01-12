@@ -149,7 +149,8 @@ def geocode(query: str):
     - Détection automatique du pays pour les adresses étrangères
     - Répare les CP collés aux mots (ex : 'Hugo76600 le havre')
     """
-
+    # ⚠️ REMPLACE CECI PAR TON EMAIL PRO POUR NE PLUS JAMAIS ETRE BLOQUÉ
+    MY_USER_AGENT = "jarod@hors-site.com"
     if not query or not isinstance(query, str):
         return None
 
