@@ -850,161 +850,137 @@ def map_to_html(fmap):
     bio = BytesIO(); bio.write(s); bio.seek(0); return bio
 
 # ======================== INTERFACE =========================
-st.markdown("""
 
-<style>
+# --- SIDEBAR (Barre latérale pour le support et les réglages) ---
+with st.sidebar:
+    st.image("Conseil-noir.jpg", width=180) # Logo ici c'est plus propre
+    st.markdown("### 🛠️ Centre de contrôle")
+    
+    st.info("👋 **Besoin d'aide ?**\n\nSi ça plante, contacte **JAROD**.")
+    
+    st.markdown("---")
+    st.markdown("#### ⚙️ Configuration des noms")
+    # On cache les noms de fichiers ici pour ne pas polluer l'écran principal
+    name_full = st.text_input("Fichier Excel complet", "Sourcing_MOA")
+    name_simple = st.text_input("Fichier contact simple", "MOA_contact_simple")
+    name_map = st.text_input("Fichier Carte HTML", "Carte_MOA")
 
-/* ================================
-      THEME CLAIR FORCÉ
-================================ */
-html, body, .stApp {
-    background: #FFFFFF !important;
-    color: #000000 !important;
-}
+# --- MAIN PAGE ---
 
-/* Désactivation totale du mode sombre */
-@media (prefers-color-scheme: dark) {
-    html, body, .stApp {
-        background: #FFFFFF !important;
-        color: #000000 !important;
-    }
-}
+# Un beau titre avec une icône
+st.title("🚀 Générateur de Sourcing MOA")
+st.markdown("---")
 
-/* ================================
-      TITRES - TEXTES
-================================ */
-h1, h2, h3, h4, h5, h6 {
-    color: #0B1D4F !important;
-    font-family: "Inter", sans-serif !important;
-    font-weight: 700 !important;
-}
+# Conteneur principal style "Carte"
+with st.container():
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("1. Configuration")
+        mode = st.radio(
+            "Mode de traitement :", 
+            ["🧾 Mode simple", "🚗 Mode enrichi (distances)"], 
+            captions=["Juste le nettoyage Excel", "Calculs + Carte interactive"]
+        )
 
-label, p, span, div, textarea, input {
-    color: #000000 !important;
-    font-family: "Inter", sans-serif !important;
-}
+    with col2:
+        st.subheader("2. Importation")
+        file = st.file_uploader("Dépose ton CSV ici", type=["csv"], help="Fichier exporté depuis ta base")
 
-/* ================================
-      BOUTONS (STYLE MODERNE)
-================================ */
-.stButton>button,
-.stDownloadButton>button {
-    background: #0B1D4F !important;     /* Bleu foncé */
-    color: #FFFFFF !important;          /* Texte blanc */
-    border-radius: 8px !important;
-    padding: 0.5rem 1.2rem !important;
-    border: none !important;
-    font-weight: 600 !important;
-}
-
-/* Hover */
-.stButton>button:hover,
-.stDownloadButton>button:hover {
-    opacity: 0.85 !important;
-    color: #FFFFFF !important;
-}
-
-/* Correction Streamlit : texte interne dans un <p> → forcer blanc */
-.stButton button *,
-.stDownloadButton button * {
-    color: #FFFFFF !important;
-}
-
-.stButton button p,
-.stDownloadButton button p {
-    color: #FFFFFF !important;
-}
-
-/* ================================
-      INPUTS / FILE UPLOAD
-================================ */
-.stTextInput>div>div>input,
-.stFileUploader>div>div {
-    background-color: #ffffff !important;
-    color: #000000 !important;
-}
-
-/* ================================
-      RADIOS HORIZONTALES
-================================ */
-.stRadio > div {
-    flex-direction: row !important;
-    gap: 20px !important;
-}
-
-/* ================================
-      DATAFRAME
-================================ */
-[data-testid="stDataFrame"] {
-    color: black !important;
-}
-
-</style>
-
-""", unsafe_allow_html=True)
-
-# ===============================================================
-# APP
-# ===============================================================
-
-
-
-st.title("📍Sortie excel, Contacter JAROD en cas de problème")
-st.image("Conseil-noir.jpg", width=220)
-
-
-mode = st.radio("Choisir le mode :", ["🧾 Mode simple", "🚗 Mode enrichi (distances + carte)"], horizontal=True)
-base_address = st.text_input("🏠 Adresse du projet (CP + ville ou adresse complète)",
-                             placeholder="Ex : 33210 Langon  •  ou  17 Boulevard Allende 33210 Langon")
-
-file = st.file_uploader("📄 Fichier CSV", type=["csv"])
-
-name_full   = st.text_input("Nom du fichier Excel complet (sans extension)", "Sourcing_MOA")
-name_simple = st.text_input("Nom du fichier contact simple (sans extension)", "MOA_contact_simple")
-name_map    = st.text_input("Nom du fichier carte HTML (sans extension)", "Carte_MOA")
-
-generate_map = False
+# Section Adresse (seulement si nécessaire)
 if mode == "🚗 Mode enrichi (distances + carte)":
-    generate_map = st.button("🗺️ Générer la carte maintenant")
+    st.markdown("### 📍 Point de référence")
+    base_address = st.text_input(
+        "Adresse du projet",
+        placeholder="Ex : 33210 Langon (Code postal ou adresse complète)",
+        help="Sert de point central pour calculer les distances."
+    )
+else:
+    base_address = None
 
-if file and (mode == "🧾 Mode simple" or base_address):
-    try:
-        with st.spinner("⏳ Traitement en cours..."):
-            base_df = process_csv_to_df(file)       # ✅ Contact MOA e-mail déjà calculé (v12-style+)
-            if mode == "🚗 Mode enrichi (distances + carte)":
-                df, base_coords, coords_dict = compute_distances(base_df, base_address)
-            else:
-                df, base_coords, coords_dict = base_df.copy(), None, {}
+# --- ACTION ---
+st.markdown("<br>", unsafe_allow_html=True) # Petit espace
 
-        st.success("✅ Traitement terminé")
+# Bouton de génération de carte (conditionnel)
+generate_map = False
 
-        # contact simple
-        x1 = to_simple(base_df, template="doc_base_contact_simple.xlsx", start=11)
-        st.download_button("⬇️ Télécharger le contact simple",
-                   data=x1, file_name=f"{name_simple}.xlsx",
-                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+if file:
+    # On vérifie si on a l'adresse pour le mode enrichi
+    ready_to_go = True
+    if mode == "🚗 Mode enrichi (distances + carte)" and not base_address:
+        st.warning("⚠️ Merci de renseigner une adresse de projet pour le calcul des distances.")
+        ready_to_go = False
 
-        if mode == "🚗 Mode enrichi (distances + carte)":
-            # Excel complet
-            x2 = to_excel(df)
-            st.download_button("⬇️ Télécharger l'Excel complet",
-                               data=x2, file_name=f"{name_full}.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if ready_to_go:
+        # On utilise un 'status' c'est plus joli que le spinner classique
+        with st.status("Traitement des données en cours...", expanded=True) as status:
+            try:
+                st.write("🔄 Lecture et nettoyage du fichier...")
+                base_df = process_csv_to_df(file)
+                
+                if mode == "🚗 Mode enrichi (distances + carte)":
+                    st.write("🌍 Interrogation des API de géolocalisation...")
+                    df, base_coords, coords_dict = compute_distances(base_df, base_address)
+                else:
+                    df, base_coords, coords_dict = base_df.copy(), None, {}
+                
+                status.update(label="✅ Traitement terminé avec succès !", state="complete", expanded=False)
 
-            # Carte à la demande
-            if generate_map and base_coords:
-                fmap = make_map(df, base_coords, coords_dict, base_address)
-                htmlb = map_to_html(fmap)
-                st.download_button("📥 Télécharger la carte (HTML)",
-                                   data=htmlb, file_name=f"{name_map}.html", mime="text/html")
-                st_html(htmlb.getvalue().decode("utf-8"), height=520)
-                st.caption("🧭 Distances calculées à vol d’oiseau (géodésiques).")
+                # --- RESULTATS ---
+                st.success("Fichiers prêts au téléchargement !")
 
-        st.subheader("📋 Aperçu des données")
-        st.dataframe(df.head(12))
+                # Zone de téléchargement avec des colonnes
+                dcol1, dcol2, dcol3 = st.columns(3)
+                
+                with dcol1:
+                    x1 = to_simple(base_df, template="doc_base_contact_simple.xlsx", start=11)
+                    st.download_button(
+                        "⬇️ Contact Simple (.xlsx)",
+                        data=x1,
+                        file_name=f"{name_simple}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True
+                    )
 
-    except Exception as e:
-        st.error(f"Erreur : {e}")
+                if mode == "🚗 Mode enrichi (distances + carte)":
+                    with dcol2:
+                        x2 = to_excel(df)
+                        st.download_button(
+                            "⬇️ Excel Complet (.xlsx)",
+                            data=x2,
+                            file_name=f"{name_full}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True
+                        )
+                    
+                    with dcol3:
+                        if base_coords:
+                            fmap = make_map(df, base_coords, coords_dict, base_address)
+                            htmlb = map_to_html(fmap)
+                            st.download_button(
+                                "📥 Carte Interactive (.html)",
+                                data=htmlb,
+                                file_name=f"{name_map}.html",
+                                mime="text/html",
+                                use_container_width=True
+                            )
+                
+                # Aperçu et Carte
+                st.markdown("---")
+                st.subheader("📊 Aperçu des données")
+                st.dataframe(df.head(10), use_container_width=True)
+
+                if mode == "🚗 Mode enrichi (distances + carte)" and base_coords:
+                    st.subheader("🗺️ Visualisation")
+                    st_html(htmlb.getvalue().decode("utf-8"), height=500)
+
+            except Exception as e:
+                status.update(label="❌ Une erreur est survenue", state="error")
+                st.error(f"Détail de l'erreur : {e}")
+
+else:
+    # Message d'attente gentil
+    st.info("👆 Commence par charger un fichier CSV pour activer l'outil.")
 
 
 
