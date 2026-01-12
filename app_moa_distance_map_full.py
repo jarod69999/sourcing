@@ -140,17 +140,16 @@ def clean_internal_codes(addr: str) -> str:
     addr = re.sub(r"\s{2,}", " ", addr).strip(" ,.-")
     return addr
 
-
 @st.cache_data(show_spinner=False)
 def geocode(query: str):
     """
-    Géocode robuste v19 :
-    - Cas spécial : code postal FR seul (5 chiffres) -> CP, France
-    - Détection automatique du pays pour les adresses étrangères
-    - Répare les CP collés aux mots (ex : 'Hugo76600 le havre')
+    Géocode robuste v21 :
+    - Identité unifiée pour éviter le blocage Nominatim
+    - Affichage de l'erreur réelle en cas d'échec
     """
     # ⚠️ REMPLACE CECI PAR TON EMAIL PRO POUR NE PLUS JAMAIS ETRE BLOQUÉ
-    MY_USER_AGENT = "jarod@hors-site.com"
+    MY_USER_AGENT = "app_sourcing_contact_at_mondomaine_com" 
+
     if not query or not isinstance(query, str):
         return None
 
@@ -164,13 +163,13 @@ def geocode(query: str):
     q_low = q.lower().strip()
 
     # ================= 1) CAS SPECIAL : CP FR SEUL =================
-    # Exemple : "33210" -> on force "33210, France"
     if re.fullmatch(r"\d{5}", q_low):
-        geolocator = Nominatim(user_agent="app_sourcing_ton_unique_nom")
+        geolocator = Nominatim(user_agent=MY_USER_AGENT)
         try:
-            time.sleep(1)
+            time.sleep(1.1) # Petite pause respectueuse pour l'API
             loc = geolocator.geocode(f"{q_low}, France", timeout=20, addressdetails=True)
-        except Exception:
+        except Exception as e:
+            print(f"❌ Erreur CP seul ({q_low}): {e}") # Affiche l'erreur réelle
             loc = None
 
         if not loc:
@@ -181,61 +180,38 @@ def geocode(query: str):
         postcode = addr.get("postcode", q_low)
         return (loc.latitude, loc.longitude, country, postcode)
 
-    # ================= 2) DETECTION PAYS PAR HEURISTIQUES =================
-
-    # 🇳🇱 Pays-Bas (CP 1234AB, villes NL, etc.)
-    if re.search(r"\b\d{4}[a-z]{2}\b", q_low) or any(v in q_low for v in [
-        "amsterdam", "rotterdam", "utrecht", "eindhoven", "groningen"
-    ]):
+    # ================= 2) DETECTION PAYS =================
+    # ... (On garde ta logique pays telle quelle) ...
+    if re.search(r"\b\d{4}[a-z]{2}\b", q_low) or any(v in q_low for v in ["amsterdam", "rotterdam", "utrecht", "eindhoven", "groningen"]):
         country_hint = "Netherlands"
-
-    # 🇧🇪 Belgique (B3570, CP 4 chiffres, villes BE)
-    elif (
-        re.match(r"^b\d{4}$", q_low)
-        or (re.fullmatch(r"\d{4}", q_low) and 1000 <= int(q_low) <= 9999)
-        or any(v in q_low for v in ["belg", "aarschot", "alken", "ittre", "maasmechelen", "sambreville"])
-    ):
+    elif (re.match(r"^b\d{4}$", q_low) or (re.fullmatch(r"\d{4}", q_low) and 1000 <= int(q_low) <= 9999) or any(v in q_low for v in ["belg", "aarschot", "alken", "ittre", "maasmechelen", "sambreville"])):
         country_hint = "Belgium"
-
-    # 🇱🇺 Luxembourg
     elif re.match(r"l-\d{4,5}", q_low) or "luxem" in q_low:
         country_hint = "Luxembourg"
-
-    # 🇪🇸 Espagne (Vila-real, Castellón, 12540, Espagne…)
-    elif (
-        "vila-real" in q_low or "vilareal" in q_low
-        or "castell" in q_low or "espa" in q_low
-        or "barcelone" in q_low or "barcelona" in q_low
-        or q_low.startswith("es-") or "12540" in q_low
-    ):
+    elif ("vila-real" in q_low or "vilareal" in q_low or "castell" in q_low or "espa" in q_low or "barcelone" in q_low or "barcelona" in q_low or q_low.startswith("es-") or "12540" in q_low):
         country_hint = "Spain"
-
-    # 🇮🇹 Italie
-    elif "ital" in q_low or q_low.startswith("it-") or any(v in q_low for v in [
-        "brescia", "bedizzole", "milano", "roma", "verona"
-    ]):
+    elif "ital" in q_low or q_low.startswith("it-") or any(v in q_low for v in ["brescia", "bedizzole", "milano", "roma", "verona"]):
         country_hint = "Italy"
-
-    # 🇨🇭 Suisse
     elif "suisse" in q_low or "switzerland" in q_low or "ch-" in q_low:
         country_hint = "Switzerland"
-
-    # 🇫🇷 Défaut : France
     else:
         country_hint = "France"
 
-    # ================= 3) REQUETE NOMINATIM =================
+    # ================= 3) REQUETE PRINCIPALE =================
 
-    # Si un pays est déjà écrit dans l’adresse, on ne rajoute rien
     query_full = q if has_explicit_country(q) else f"{q}, {country_hint}"
 
-    geolocator = Nominatim(user_agent=MY_USER_AGENT)
+    # C'EST ICI QUE TU AVAIS OUBLIÉ DE CHANGER LE NOM ! 👇
+    geolocator = Nominatim(user_agent=MY_USER_AGENT) 
+    
     try:
-        time.sleep(1)
+        time.sleep(1.1)
         loc = geolocator.geocode(query_full, timeout=20, addressdetails=True)
         if not loc:
+            print(f"⚠️ Aucun résultat pour : {query_full}")
             return None
-    except Exception:
+    except Exception as e:
+        print(f"❌ Erreur Géocodage ({query_full}): {e}") # Pour voir si c'est une erreur 403/Timeout
         return None
 
     addr = loc.raw.get("address", {})
@@ -243,25 +219,20 @@ def geocode(query: str):
     cp_res = addr.get("postcode", "")
 
     # Ajustements fins
-
-    # Vila-real -> toujours 12540 Espagne
     if "vila-real" in q_low or "vilareal" in q_low:
         cp_res = "12540"
         country_res = "Espagne"
-
-    # Pays-Bas si CP 1234AB repéré
     if re.search(r"\b\d{4}[A-Za-z]{2}\b", q):
         country_res = "Pays-Bas"
-
-    # Belgique si CP Bxxxx
     if re.match(r"^b\d{4}$", q_low):
         country_res = "Belgique"
-
-    # Luxembourg si L-xxxx
     if re.match(r"l-\d{4}", q_low):
         country_res = "Luxembourg"
 
     return (loc.latitude, loc.longitude, country_res, cp_res)
+
+
+   
 
 
 
