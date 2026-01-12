@@ -165,7 +165,7 @@ def geocode(query: str):
     # ================= 1) CAS SPECIAL : CP FR SEUL =================
     # Exemple : "33210" -> on force "33210, France"
     if re.fullmatch(r"\d{5}", q_low):
-        geolocator = Nominatim(user_agent="moa_geo_cp_only")
+        geolocator = Nominatim(user_agent="app_sourcing_ton_unique_nom")
         try:
             time.sleep(1)
             loc = geolocator.geocode(f"{q_low}, France", timeout=20, addressdetails=True)
@@ -228,7 +228,7 @@ def geocode(query: str):
     # Si un pays est déjà écrit dans l’adresse, on ne rajoute rien
     query_full = q if has_explicit_country(q) else f"{q}, {country_hint}"
 
-    geolocator = Nominatim(user_agent="moa_geo_v19")
+    geolocator = Nominatim(user_agent="moa_geo_v20")
     try:
         time.sleep(1)
         loc = geolocator.geocode(query_full, timeout=20, addressdetails=True)
