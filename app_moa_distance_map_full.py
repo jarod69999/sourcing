@@ -10,7 +10,7 @@ from folium.features import DivIcon
 from streamlit.components.v1 import html as st_html
 
 # ========================== CONFIG ==========================
-TEMPLATE_PATH = "Sourcing base.xlsx"   # modèle Excel avec en-têtes
+TEMPLATE_PATH = "Sourcing COMPLET.xlsx"   # modèle Excel complet avec en-têtes
 START_ROW = 11                         # 1re ligne de data dans le modèle
 
 PRIMARY = "#0b1d4f"
@@ -292,185 +292,349 @@ def distance_km(base_coords, coords):
 
 
 
-# ================= COLONNES & CONTACT MOA (v12-style+) ======
+# ================= COLONNES & CONTACT MOA =====================
+ROLE_LABELS = {
+    "commercial": "Contact Commercial",
+    "communication": "Contact Communication",
+    "direction": "Contact Direction",
+    "technique": "Contact Technique",
+}
+
+ROLE_PREFIXES = {
+    "communication": ("comce", "communication"),
+    "commercial": ("com", "commercial"),
+    "direction": ("dir", "direction"),
+    "technique": ("tech", "technique"),
+}
+
+
+def _clean_value(value) -> str:
+    """Convertit proprement une valeur CSV en texte sans transformer les NaN en 'nan'."""
+    if value is None or pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _canon_col(name: str) -> str:
+    """Normalise un nom de colonne pour rendre la détection robuste."""
+    s = unicodedata.normalize("NFKD", str(name))
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s
+
+
 def _find_columns(cols):
     """
-    Détection robuste des colonnes :
-    - champs clés (raison/catégorie/référent/email_referent/adresse)
-    - groupes de colonnes contacts (tech/dir/comce/com)
-    - colonnes 'contacts' génériques
+    Détecte :
+      - raison sociale / catégorie / référent MOA / adresse
+      - pour chaque famille de contact : Email / Nom / Prénom
+
+    Le CSV actuel utilise notamment :
+      Com-Email / Com-Nom / Com-Prenom
+      Comce-Email / Comce-Nom / Comce-Prenom
+      Dir-Email / Dir-Nom / Dir-Prenom
+      Tech-Email / Tech-Nom / Tech-Prenom
     """
     res = {
-        "tech_cols": [], "dir_cols": [], "comce_cols": [], "com_cols": [], "contact_cols": []
+        "role_fields": {
+            role: {"email": None, "nom": None, "prenom": None}
+            for role in ROLE_LABELS
+        }
     }
+
     for c in cols:
-        cl = c.lower().strip()
+        key = _canon_col(c)
 
-        # clés fixes
-        if "raison" in cl and "sociale" in cl: res["raison"] = c
-        elif "catég" in cl or "categorie" in cl: res["categorie"] = c
-        elif ("référent" in cl and "moa" in cl) or ("referent" in cl and "moa" in cl): res["referent"] = c
-        elif ("email" in cl and "referent" in cl) or ("email" in cl and "référent" in cl): res["email_referent"] = c
-        elif "adress" in cl: res["adresse"] = c
+        # Colonnes principales
+        if "raison" in key and "social" in key:
+            res["raison"] = c
+        elif "categor" in key:
+            res["categorie"] = c
+        elif "referent" in key and "moa" in key:
+            res["referent"] = c
+        elif "adresse" in key:
+            # Priorité à une colonne Adresse générale si elle existe ;
+            # sinon Adresse-du-siège convient.
+            if "adresse" not in res or key == "adresse":
+                res["adresse"] = c
 
-        # contacts : large
-        # on classe par priorité via mots-clés
-        if "tech" in cl:
-            res["tech_cols"].append(c)
-        if "dir" in cl or "dirige" in cl:
-            res["dir_cols"].append(c)
-        if "comce" in cl:  # si tu as cet acronyme précis
-            res["comce_cols"].append(c)
-        # "com" peut être ambigu (company). On limite aux variantes usuelles:
-        if re.search(r"\bcom\b|\bcommercial", cl):
-            res["com_cols"].append(c)
-        # colonnes génériques "contact" (si pas déjà rangées)
-        if "contact" in cl and c not in (res["tech_cols"] + res["dir_cols"] + res["comce_cols"] + res["com_cols"]):
-            res["contact_cols"].append(c)
+        # Colonnes contacts structurées
+        for role, prefixes in ROLE_PREFIXES.items():
+            matched_prefix = None
+            for prefix in prefixes:
+                if key == prefix or key.startswith(prefix + "-"):
+                    matched_prefix = prefix
+                    break
+            if not matched_prefix:
+                continue
 
-        # colonne simple "contacts"
-        if "contacts" == cl or cl.startswith("contacts "):
-            res["contacts"] = c
+            suffix = key[len(matched_prefix):].strip("-")
+            if "email" in suffix or "mail" in suffix:
+                res["role_fields"][role]["email"] = c
+            elif suffix in ("nom", "name") or suffix.endswith("-nom"):
+                res["role_fields"][role]["nom"] = c
+            elif "prenom" in suffix or "first-name" in suffix or "firstname" in suffix:
+                res["role_fields"][role]["prenom"] = c
 
     return res
 
-def _first_email_in_text(text:str)->str|None:
-    if not isinstance(text,str): return None
-    m = EMAIL_RE.search(text)
-    return m.group(0) if m else None
 
-def _email_local(e:str)->str:
-    return e.split("@",1)[0].lower() if isinstance(e,str) else ""
-
-def _tokens(name:str)->list[str]:
-    if not isinstance(name,str): return []
-    return [t for t in re.split(r"[\s\-]+", name.lower()) if len(t)>=2]
-
-def _emails_from_columns(row, cols):
-    for col in cols:
-        val = str(row.get(col, "")).strip()
-        if not val: 
-            continue
-        em = _first_email_in_text(val) or (val if "@" in val else None)
-        if em:
-            return em
+def _referent_role(value: str) -> str | None:
+    """Traduit 'Contact Technique', 'Contact Commercial', etc. en rôle interne."""
+    key = _canon_col(_clean_value(value))
+    if not key:
+        return None
+    if "communication" in key:
+        return "communication"
+    if "commercial" in key:
+        return "commercial"
+    if "direction" in key or "dirige" in key:
+        return "direction"
+    if "technique" in key or "technical" in key:
+        return "technique"
     return None
 
-def choose_contact_moa(row, colmap):
+
+def _contact_from_role(row, colmap, role: str):
+    fields = colmap.get("role_fields", {}).get(role, {})
+    email = _clean_value(row.get(fields.get("email"), "")) if fields.get("email") else ""
+    nom = _clean_value(row.get(fields.get("nom"), "")) if fields.get("nom") else ""
+    prenom = _clean_value(row.get(fields.get("prenom"), "")) if fields.get("prenom") else ""
+
+    if not (email or nom or prenom):
+        return None
+
+    return {
+        "role": role,
+        "label": ROLE_LABELS[role],
+        "email": email,
+        "nom": nom,
+        "prenom": prenom,
+    }
+
+
+def _all_contacts(row, colmap):
+    """Retourne tous les contacts renseignés dans le CSV, rôle par rôle."""
+    contacts = []
+    for role in ["commercial", "communication", "direction", "technique"]:
+        c = _contact_from_role(row, colmap, role)
+        if c:
+            contacts.append(c)
+    return contacts
+
+
+def _normalized_name(contact) -> str:
+    if not contact:
+        return ""
+    name = f"{contact.get('nom', '')} {contact.get('prenom', '')}".strip()
+    return _canon_col(name)
+
+
+def _same_contact(a, b) -> bool:
+    """Identifie une même personne par e-mail, ou à défaut par nom/prénom."""
+    if not a or not b:
+        return False
+
+    ea = _clean_value(a.get("email", "")).lower()
+    eb = _clean_value(b.get("email", "")).lower()
+    if ea and eb and ea == eb:
+        return True
+
+    na = _normalized_name(a)
+    nb = _normalized_name(b)
+    return bool(na and nb and na == nb)
+
+
+def _enrich_contact(primary, contacts):
+    """Complète Nom/Prénom/E-mail si la même personne existe dans une autre famille de contact."""
+    if not primary:
+        return None
+
+    result = primary.copy()
+    for c in contacts:
+        if c is primary:
+            continue
+        if _same_contact(result, c):
+            if not result.get("email") and c.get("email"):
+                result["email"] = c["email"]
+            if not result.get("nom") and c.get("nom"):
+                result["nom"] = c["nom"]
+            if not result.get("prenom") and c.get("prenom"):
+                result["prenom"] = c["prenom"]
+    return result
+
+
+def choose_contact_moa_info(row, colmap):
     """
-    Priorité:
-      1) email_referent direct
-      2) matching nom référent sur groupes Tech/Dir/Comce/Com (v12-style: colonnes nommées librement)
-      3) fallback premier dispo Tech -> Dir -> Comce -> Com -> Contacts génériques (y compris "Contacts")
+    Choisit le contact MOA selon la valeur de 'Référent-MOA'.
+
+    Exemple :
+      'Contact Commercial'    -> colonnes Com-*
+      'Contact Communication' -> colonnes Comce-*
+      'Contact Direction'     -> colonnes Dir-*
+      'Contact Technique'     -> colonnes Tech-*
+
+    Si le contact demandé n'est pas renseigné, un fallback est utilisé pour
+    éviter de perdre un contact disponible dans le CSV.
     """
-    # 1) email référent explicite
-    if colmap.get("email_referent"):
-        v = row.get(colmap["email_referent"], "")
-        if isinstance(v,str) and "@" in v:
-            return v.strip()
+    contacts = _all_contacts(row, colmap)
 
-    # groupes détectés
-    tech = colmap.get("tech_cols", [])
-    diro = colmap.get("dir_cols", [])
-    comce = colmap.get("comce_cols", [])
-    com = colmap.get("com_cols", [])
-    generic = colmap.get("contact_cols", [])
-    contacts_simple = [colmap.get("contacts")] if colmap.get("contacts") else []
+    referent_value = ""
+    if colmap.get("referent"):
+        referent_value = _clean_value(row.get(colmap["referent"], ""))
+    wanted_role = _referent_role(referent_value)
 
-    # 2) matching par nom du référent (si fourni)
-    referent = str(row.get(colmap.get("referent",""), "")).strip() if colmap.get("referent") else ""
-    toks = _tokens(referent)
+    # 1) rôle indiqué dans Référent-MOA
+    primary = None
+    if wanted_role:
+        primary = _contact_from_role(row, colmap, wanted_role)
+        if primary:
+            primary = _enrich_contact(primary, contacts)
 
-    if toks:
-        # on rassemble les candidats (ordre de priorité)
-        scan_groups = [tech, diro, comce, com, generic, contacts_simple]
-        for group in scan_groups:
-            # on cherche l'email dont la partie locale match le plus de tokens
-            best_email, best_score = None, -1
-            for col in group:
-                val = str(row.get(col, "")).strip()
-                em = _first_email_in_text(val) or (val if "@" in val else None)
-                if not em: 
-                    continue
-                local = _email_local(em)
-                score = sum(t in local for t in toks)
-                if score > best_score:
-                    best_score, best_email = score, em
-            if best_email and best_score > 0:
-                return best_email
+    # 2) fallback si le rôle référent est vide/non renseigné
+    if not primary:
+        fallback_order = ["technique", "direction", "communication", "commercial"]
+        # d'abord un contact avec e-mail
+        for role in fallback_order:
+            c = _contact_from_role(row, colmap, role)
+            if c and c.get("email"):
+                primary = _enrich_contact(c, contacts)
+                break
+        # sinon n'importe quel contact avec un nom
+        if not primary:
+            for role in fallback_order:
+                c = _contact_from_role(row, colmap, role)
+                if c:
+                    primary = _enrich_contact(c, contacts)
+                    break
 
-    # 3) fallback: premier email dispo selon l'ordre Tech -> Dir -> Comce -> Com -> Contacts génériques -> "Contacts"
-    for group in [tech, diro, comce, com, generic, contacts_simple]:
-        em = _emails_from_columns(row, group)
-        if em:
-            return em
+    return primary
 
-    return ""
- 
+
+def format_contact_name(contact) -> str:
+    """Nom + prénom du contact MOA, conformément à la colonne du modèle Excel."""
+    if not contact:
+        return ""
+    return " ".join(
+        part for part in [_clean_value(contact.get("nom", "")), _clean_value(contact.get("prenom", ""))]
+        if part
+    ).strip()
+
+
+def format_other_contacts(row, colmap, primary_contact) -> str:
+    """
+    Agrège tous les autres contacts dans une cellule Excel :
+      Contact Direction : NOM Prénom - email
+      Contact Technique : NOM Prénom - email
+
+    - exclut le contact MOA retenu ;
+    - supprime les doublons lorsque la même personne est répétée sur plusieurs rôles.
+    """
+    lines = []
+    seen = set()
+
+    for c in _all_contacts(row, colmap):
+        if primary_contact and _same_contact(c, primary_contact):
+            continue
+
+        email_key = _clean_value(c.get("email", "")).lower()
+        name_key = _normalized_name(c)
+        identity = ("email", email_key) if email_key else ("name", name_key)
+        if identity in seen or (not email_key and not name_key):
+            continue
+        seen.add(identity)
+
+        name = format_contact_name(c)
+        email = _clean_value(c.get("email", ""))
+
+        if name and email:
+            detail = f"{name} - {email}"
+        else:
+            detail = name or email
+
+        if detail:
+            lines.append(f"{c['label']} : {detail}")
+
+    return "\n".join(lines)
+
+
 def process_csv_to_df(csv_bytes):
     """
-    Lit le CSV et construit le DataFrame de base :
-    - conserve les colonnes essentielles (raison, catégorie, adresse, référent)
-    - calcule le Contact MOA selon la logique élargie (v12-style)
-    - garde les colonnes d'implantations industrielles et du siège pour la sélection des sites
-    - crée toujours une colonne 'Adresse' même si elle n’existe pas dans le CSV
+    Lit le CSV et construit le DataFrame de base avec :
+      - Raison sociale
+      - Référent MOA
+      - Contact MOA (e-mail)
+      - Contact MOA NOM prénom
+      - Autres contacts (tous les contacts hors référent MOA)
+      - Catégories
+      - Adresse / implantations nécessaires au calcul des distances
     """
     try:
         df = pd.read_csv(csv_bytes, sep=None, engine="python")
     except Exception:
+        # Important avec UploadedFile : revenir au début avant une 2e lecture
+        try:
+            csv_bytes.seek(0)
+        except Exception:
+            pass
         df = pd.read_csv(csv_bytes, sep=";", engine="python")
 
-    # Détection des colonnes importantes
     colmap = _find_columns(df.columns)
-
-    out = pd.DataFrame()
+    out = pd.DataFrame(index=df.index)
 
     # --- Colonnes principales ---
-    out["Raison sociale"] = (
-        df[colmap.get("raison", "")].astype(str).fillna("")
-        if colmap.get("raison") else df.get("Raison sociale", "")
-    )
-
-    out["Référent MOA"] = (
-        df[colmap.get("referent", "")].astype(str).fillna("")
-        if colmap.get("referent") else df.get("Référent MOA", "")
-    )
-
-    out["Catégories"] = (
-        df[colmap.get("categorie", "")].astype(str).fillna("")
-        if colmap.get("categorie") else df.get("Catégories", "")
-    )
-
-    # --- Adresse principale : crée toujours la colonne ---
-    if colmap.get("adresse"):
-        out["Adresse"] = df[colmap["adresse"]].astype(str).fillna("")
-    elif "Adresse" in df.columns:
-        out["Adresse"] = df["Adresse"].astype(str).fillna("")
-    elif "Adresse-du-siège" in df.columns:
-        out["Adresse"] = df["Adresse-du-siège"].astype(str).fillna("")
-    elif "adresse-du-siège" in df.columns:
-        out["Adresse"] = df["adresse-du-siège"].astype(str).fillna("")
+    if colmap.get("raison"):
+        out["Raison sociale"] = df[colmap["raison"]].apply(_clean_value)
     else:
-        # dernier recours : première adresse industrielle trouvée
-        possible_cols = [c for c in df.columns if "implant" in c.lower()]
+        out["Raison sociale"] = ""
+
+    if colmap.get("referent"):
+        out["Référent MOA"] = df[colmap["referent"]].apply(_clean_value)
+    else:
+        out["Référent MOA"] = ""
+
+    if colmap.get("categorie"):
+        out["Catégories"] = df[colmap["categorie"]].apply(_clean_value)
+    else:
+        out["Catégories"] = ""
+
+    # --- Adresse principale ---
+    if colmap.get("adresse"):
+        out["Adresse"] = df[colmap["adresse"]].apply(_clean_value)
+    else:
+        possible_cols = [c for c in df.columns if "implant" in _canon_col(c)]
         if possible_cols:
-            out["Adresse"] = df[possible_cols[0]].astype(str).fillna("")
+            out["Adresse"] = df[possible_cols[0]].apply(_clean_value)
         else:
             out["Adresse"] = ""
 
-    # --- Contact MOA (calcul automatique) ---
-    out["Contact MOA"] = df.apply(lambda r: choose_contact_moa(r, colmap), axis=1)
+    # --- Contacts ---
+    primary_contacts = []
+    other_contacts = []
+    for _, row in df.iterrows():
+        primary = choose_contact_moa_info(row, colmap)
+        primary_contacts.append(primary)
+        other_contacts.append(format_other_contacts(row, colmap, primary))
+
+    out["Contact MOA"] = [
+        _clean_value(c.get("email", "")) if c else ""
+        for c in primary_contacts
+    ]
+    out["Contact MOA NOM prénom"] = [
+        format_contact_name(c) if c else ""
+        for c in primary_contacts
+    ]
+    out["Autres contacts"] = other_contacts
 
     # --- Colonnes supplémentaires : implantations industrielles et siège ---
-    extra_cols = []
     for c in df.columns:
-        cl = str(c).lower()
-        if ("implant" in cl and "indus" in cl) or ("siège" in cl) or ("siege" in cl):
-            extra_cols.append(c)
-    for c in extra_cols:
-        out[c] = df[c].astype(str).fillna("")
+        cl = _canon_col(c)
+        if ("implant" in cl and "indus" in cl) or "siege" in cl:
+            out[c] = df[c].apply(_clean_value)
 
     return out
+
 
 def pick_site_with_indus_priority(addr_field: str, base_coords: tuple[float, float], row=None):
     """
@@ -729,6 +893,8 @@ def compute_distances(df, base_address):
             "Catégories": row.get("Catégories", ""),
             "Référent MOA": row.get("Référent MOA", ""),
             "Contact MOA": row.get("Contact MOA", ""),
+            "Contact MOA NOM prénom": row.get("Contact MOA NOM prénom", ""),
+            "Autres contacts": row.get("Autres contacts", ""),
             "Type de distance": dist_type,
             "Fiabilité géocode": "indus",
         })
@@ -738,53 +904,73 @@ def compute_distances(df, base_address):
 
 # ========================= EXCEL ============================
 def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
-    """Excel complet : Adresse / CP séparés + Contact MOA e-mail."""
+    """
+    Excel complet basé sur 'Sourcing COMPLET.xlsx'.
+
+    Colonnes :
+      A = Raison sociale
+      B = Pays
+      C = Adresse
+      D = Code postal
+      E = Distance au projet
+      F = Catégories
+      G = Référent MOA
+      H = Contact MOA (e-mail)
+      I = Contact MOA NOM prénom
+      J = Contact autre
+    """
     wb = load_workbook(template)
     ws = wb.worksheets[0]
-    max_cols = 8
-    for r in range(start, ws.max_row+1):
-        for c in range(1, max_cols+1):
-            ws.cell(r, c, value=None)
-    for i, (_, r) in enumerate(df.iterrows(), start=start):
-        ws.cell(i,1, r.get("Raison sociale",""))
-        ws.cell(i,2, r.get("Pays",""))
-        ws.cell(i,3, r.get("Adresse",""))
-        ws.cell(i,4, r.get("Code postal",""))
-        ws.cell(i,5, r.get("Distance au projet",""))
-        ws.cell(i,6, r.get("Catégories",""))
-        ws.cell(i,7, r.get("Référent MOA",""))
-        ws.cell(i,8, r.get("Contact MOA",""))   # e-mail dans Excel
-        ws.cell(i,9, r.get("Type de distance",""))
-    bio = BytesIO(); wb.save(bio); bio.seek(0); return bio
 
-def to_simple(df, template="doc_base_contact_simple.xlsx", start=11):
+    # Efface uniquement les anciennes données, sans toucher à la mise en forme.
+    for r in range(start, ws.max_row + 1):
+        for c in range(1, 11):
+            ws.cell(r, c, value=None)
+
+    for i, (_, r) in enumerate(df.iterrows(), start=start):
+        ws.cell(i, 1, r.get("Raison sociale", ""))
+        ws.cell(i, 2, r.get("Pays", ""))
+        ws.cell(i, 3, r.get("Adresse", ""))
+        ws.cell(i, 4, r.get("Code postal", ""))
+        ws.cell(i, 5, r.get("Distance au projet", ""))
+        ws.cell(i, 6, r.get("Catégories", ""))
+        ws.cell(i, 7, r.get("Référent MOA", ""))
+        ws.cell(i, 8, r.get("Contact MOA", ""))
+        ws.cell(i, 9, r.get("Contact MOA NOM prénom", ""))
+        ws.cell(i, 10, r.get("Autres contacts", ""))
+
+    bio = BytesIO()
+    wb.save(bio)
+    bio.seek(0)
+    return bio
+
+
+def to_simple(df, template="doc_base_contact_simplebis.xlsx", start=11):
     """
-    Génère le fichier 'contact simple' dans le modèle :
+    Génère le fichier contact simple basé sur 'doc_base_contact_simplebis.xlsx'.
+
     Colonnes :
       A = Raison sociale
       B = Référent MOA
-      C = Contact MOA
+      C = Contact MOA (e-mail)
       D = Catégories
-    Les lignes commencent à start (=11).
+      E = Autres contacts (hors référent MOA)
     """
-
-    # ouverture modèle
     wb = load_workbook(template)
     ws = wb.active
 
-    # on efface d'anciennes valeurs
+    # Efface uniquement les anciennes données, sans toucher à la mise en forme.
     for r in range(start, ws.max_row + 1):
-        for c in range(1, 5):
+        for c in range(1, 6):
             ws.cell(r, c).value = None
 
-    # remplissage
     for i, (_, row) in enumerate(df.iterrows(), start=start):
         ws.cell(i, 1, row.get("Raison sociale", ""))
         ws.cell(i, 2, row.get("Référent MOA", ""))
         ws.cell(i, 3, row.get("Contact MOA", ""))
         ws.cell(i, 4, row.get("Catégories", ""))
+        ws.cell(i, 5, row.get("Autres contacts", ""))
 
-    # export
     bio = BytesIO()
     wb.save(bio)
     bio.seek(0)
@@ -936,7 +1122,7 @@ with side_col:
         
         # Champs conditionnels selon le mode
         if mode == "🚗 Mode enrichi (Carte + Distances)":
-            name_full = st.text_input("Nom Excel Complet", "Sourcing_MOA_Full")
+            name_full = st.text_input("Nom Excel Complet", "Sourcing COMPLET")
             name_map = st.text_input("Nom Carte HTML", "Carte_Sourcing")
         else:
             name_full = "Sourcing_MOA" # Valeurs par défaut invisibles
@@ -979,12 +1165,12 @@ if generate_btn:
                 b1, b2, b3 = st.columns(3)
                 
                 with b1:
-                    x1 = to_simple(base_df, template="doc_base_contact_simple.xlsx", start=11)
+                    x1 = to_simple(base_df, template="doc_base_contact_simplebis.xlsx", start=11)
                     st.download_button("📄 EXCEL SIMPLE", data=x1, file_name=f"{name_simple}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                 
                 if mode == "🚗 Mode enrichi (Carte + Distances)":
                     with b2:
-                        x2 = to_excel(df)
+                        x2 = to_excel(df, template="Sourcing COMPLET.xlsx", start=11)
                         st.download_button("📊 EXCEL COMPLET", data=x2, file_name=f"{name_full}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     with b3:
                         if base_coords:
