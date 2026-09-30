@@ -1015,10 +1015,17 @@ def map_to_html(fmap):
 st.markdown("""
 <style>
     /* 1. Fond général BLANC comme le site officiel */
-    .stApp {
-        background-color: #FFFFFF !important;
-        font-family: 'Helvetica text', 'Helvetica', 'Arial', sans-serif;
-    }
+    .stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"] {
+    background-color: #E8DDD1 !important;
+    font-family: 'Helvetica text', 'Helvetica', 'Arial', sans-serif;
+    color: #263238 !important;
+}
+
+[data-testid="stHeader"] {
+    background-color: #E8DDD1 !important;
+}
 
     /* 2. En-têtes (H1, H2...) en Bleu Marine Hors Site */
     h1, h2, h3, h4 {
