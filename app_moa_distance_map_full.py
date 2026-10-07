@@ -14,7 +14,7 @@ TEMPLATE_PATH = "Sourcing COMPLET.xlsx"   # modèle Excel complet avec en-têtes
 START_ROW = 11                         # 1re ligne de data dans le modèle
 
 PRIMARY = "#0b1d4f"
-BG      = "#f5f0eb"
+BG      = "#e8ddd1"
 st.set_page_config(page_title="MOA – v2 ", page_icon="📍", layout="wide")
 # ===============================================================
 # KEEP ALIVE – empêche l'app de se mettre en sommeil (ping interne)
@@ -513,7 +513,7 @@ def choose_contact_moa_info(row, colmap):
 
 
 def format_contact_name(contact) -> str:
-    """Nom + prénom du contact MOA, conformément à la colonne du modèle Excel."""
+    """Nom + prénom d'un contact."""
     if not contact:
         return ""
     return " ".join(
@@ -522,20 +522,34 @@ def format_contact_name(contact) -> str:
     ).strip()
 
 
-def format_other_contacts(row, colmap, primary_contact) -> str:
-    """
-    Agrège tous les autres contacts dans une cellule Excel :
-      Contact Direction : NOM Prénom - email
-      Contact Technique : NOM Prénom - email
+def format_contact_detail(contact) -> str:
+    """Formate un contact sous la forme 'NOM Prénom - email'."""
+    if not contact:
+        return ""
+    name = format_contact_name(contact)
+    email = _clean_value(contact.get("email", ""))
+    if name and email:
+        return f"{name} - {email}"
+    return name or email
 
-    - exclut le contact MOA retenu ;
-    - supprime les doublons lorsque la même personne est répétée sur plusieurs rôles.
+
+def format_other_contacts(row, colmap, primary_contact, direction_contact=None) -> str:
+    """
+    Agrège les autres contacts dans une cellule Excel.
+
+    Sont exclus :
+      - le contact MOA retenu ;
+      - le contact Direction, désormais exporté dans sa propre colonne.
+
+    Les doublons sont supprimés lorsque la même personne est répétée sur plusieurs rôles.
     """
     lines = []
     seen = set()
 
     for c in _all_contacts(row, colmap):
         if primary_contact and _same_contact(c, primary_contact):
+            continue
+        if direction_contact and _same_contact(c, direction_contact):
             continue
 
         email_key = _clean_value(c.get("email", "")).lower()
@@ -545,14 +559,7 @@ def format_other_contacts(row, colmap, primary_contact) -> str:
             continue
         seen.add(identity)
 
-        name = format_contact_name(c)
-        email = _clean_value(c.get("email", ""))
-
-        if name and email:
-            detail = f"{name} - {email}"
-        else:
-            detail = name or email
-
+        detail = format_contact_detail(c)
         if detail:
             lines.append(f"{c['label']} : {detail}")
 
@@ -566,7 +573,8 @@ def process_csv_to_df(csv_bytes):
       - Référent MOA
       - Contact MOA (e-mail)
       - Contact MOA NOM prénom
-      - Autres contacts (tous les contacts hors référent MOA)
+      - Contact direction (NOM Prénom - e-mail)
+      - Autres contacts (hors référent MOA et hors contact Direction)
       - Catégories
       - Adresse / implantations nécessaires au calcul des distances
     """
@@ -611,11 +619,18 @@ def process_csv_to_df(csv_bytes):
 
     # --- Contacts ---
     primary_contacts = []
+    direction_contacts = []
     other_contacts = []
     for _, row in df.iterrows():
         primary = choose_contact_moa_info(row, colmap)
+        all_contacts = _all_contacts(row, colmap)
+        direction = _contact_from_role(row, colmap, "direction")
+        if direction:
+            direction = _enrich_contact(direction, all_contacts)
+
         primary_contacts.append(primary)
-        other_contacts.append(format_other_contacts(row, colmap, primary))
+        direction_contacts.append(direction)
+        other_contacts.append(format_other_contacts(row, colmap, primary, direction))
 
     out["Contact MOA"] = [
         _clean_value(c.get("email", "")) if c else ""
@@ -624,6 +639,10 @@ def process_csv_to_df(csv_bytes):
     out["Contact MOA NOM prénom"] = [
         format_contact_name(c) if c else ""
         for c in primary_contacts
+    ]
+    out["Contact direction"] = [
+        format_contact_detail(c) if c else ""
+        for c in direction_contacts
     ]
     out["Autres contacts"] = other_contacts
 
@@ -894,6 +913,7 @@ def compute_distances(df, base_address):
             "Référent MOA": row.get("Référent MOA", ""),
             "Contact MOA": row.get("Contact MOA", ""),
             "Contact MOA NOM prénom": row.get("Contact MOA NOM prénom", ""),
+            "Contact direction": row.get("Contact direction", ""),
             "Autres contacts": row.get("Autres contacts", ""),
             "Type de distance": dist_type,
             "Fiabilité géocode": "indus",
@@ -917,14 +937,15 @@ def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
       G = Référent MOA
       H = Contact MOA (e-mail)
       I = Contact MOA NOM prénom
-      J = Contact autre
+      J = Contact direction (NOM Prénom - e-mail)
+      K = Contact autre
     """
     wb = load_workbook(template)
     ws = wb.worksheets[0]
 
     # Efface uniquement les anciennes données, sans toucher à la mise en forme.
     for r in range(start, ws.max_row + 1):
-        for c in range(1, 11):
+        for c in range(1, 12):
             ws.cell(r, c, value=None)
 
     for i, (_, r) in enumerate(df.iterrows(), start=start):
@@ -937,7 +958,8 @@ def to_excel(df, template=TEMPLATE_PATH, start=START_ROW):
         ws.cell(i, 7, r.get("Référent MOA", ""))
         ws.cell(i, 8, r.get("Contact MOA", ""))
         ws.cell(i, 9, r.get("Contact MOA NOM prénom", ""))
-        ws.cell(i, 10, r.get("Autres contacts", ""))
+        ws.cell(i, 10, r.get("Contact direction", ""))
+        ws.cell(i, 11, r.get("Autres contacts", ""))
 
     bio = BytesIO()
     wb.save(bio)
@@ -954,14 +976,15 @@ def to_simple(df, template="doc_base_contact_simplebis.xlsx", start=11):
       B = Référent MOA
       C = Contact MOA (e-mail)
       D = Catégories
-      E = Autres contacts (hors référent MOA)
+      E = Contact direction (NOM Prénom - e-mail)
+      F = Autres contacts (hors référent MOA et hors contact Direction)
     """
     wb = load_workbook(template)
     ws = wb.active
 
     # Efface uniquement les anciennes données, sans toucher à la mise en forme.
     for r in range(start, ws.max_row + 1):
-        for c in range(1, 6):
+        for c in range(1, 7):
             ws.cell(r, c).value = None
 
     for i, (_, row) in enumerate(df.iterrows(), start=start):
@@ -969,7 +992,8 @@ def to_simple(df, template="doc_base_contact_simplebis.xlsx", start=11):
         ws.cell(i, 2, row.get("Référent MOA", ""))
         ws.cell(i, 3, row.get("Contact MOA", ""))
         ws.cell(i, 4, row.get("Catégories", ""))
-        ws.cell(i, 5, row.get("Autres contacts", ""))
+        ws.cell(i, 5, row.get("Contact direction", ""))
+        ws.cell(i, 6, row.get("Autres contacts", ""))
 
     bio = BytesIO()
     wb.save(bio)
@@ -1014,18 +1038,26 @@ def map_to_html(fmap):
 # --- THEME HORS SITE CONSEIL (CSS) ---
 st.markdown("""
 <style>
-    /* 1. Fond général BLANC comme le site officiel */
+    /* 1. Fond général marron clair, forcé même si l’utilisateur est en mode sombre */
     .stApp,
-[data-testid="stAppViewContainer"],
-[data-testid="stMain"] {
-    background-color: #E8DDD1 !important;
-    font-family: 'Helvetica text', 'Helvetica', 'Arial', sans-serif;
-    color: #263238 !important;
-}
+    [data-testid="stAppViewContainer"],
+    [data-testid="stMain"] {
+        background-color: #E8DDD1 !important;
+        font-family: 'Helvetica text', 'Helvetica', 'Arial', sans-serif;
+        color: #263238 !important;
+    }
 
-[data-testid="stHeader"] {
-    background-color: #E8DDD1 !important;
-}
+    /* Barre supérieure : même fond pour éviter une bande sombre */
+    [data-testid="stHeader"] {
+        background-color: #E8DDD1 !important;
+    }
+
+    /* Texte courant lisible même lorsque Streamlit est réglé en mode sombre */
+    .stApp p,
+    .stApp label,
+    .stApp span:not(.stButton span):not(.stDownloadButton span) {
+        color: #263238;
+    }
 
     /* 2. En-têtes (H1, H2...) en Bleu Marine Hors Site */
     h1, h2, h3, h4 {
